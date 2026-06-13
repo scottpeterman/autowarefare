@@ -89,22 +89,19 @@ def test_d_portal_roundtrip_persists_state() -> None:
     active = portal.transit(ow, t, state)
     assert active.name == "indoor"
 
-    hp0 = state.health
-    t = None
-    for _ in range(600):
-        t = active.update(DT, FORWARD, state)
-        if t is not None:
-            break
-        if active._in_zone(active.exit_x, active.exit_z, 45.0):
-            t = active.update(DT, ACTION, state)
-            break
-    assert state.health < hp0, "indoor hazard should spend HP"
+    # M2.0: no indoor hazard yet (combat lands in M2.2). Prove the round-trip
+    # *mechanics*: reach the exit, hand back, cleared flag set, pose restored,
+    # PlayerState carried through intact. Teleport to the exit cell rather than
+    # navigate the dungeon, mirroring the outdoor lobby teleport above.
+    hp_before = state.health
+    active.cam_x, active.cam_z = active.exit_x, active.exit_z
+    t = active.update(DT, ACTION, state)
     assert t is not None and t.target == "outdoor"
 
     active = portal.transit(active, t, state)
     assert active.name == "outdoor"
     assert state.has_cleared(TOWER_ID)
-    assert abs(state.health - 75.0) < 1e-6, "HP must persist across the seam"
+    assert abs(state.health - hp_before) < 1e-6, "HP must persist across the seam"
     assert abs(active.camera.x - saved[0]) < 1e-6 and abs(active.camera.z - saved[1]) < 1e-6
 
 

@@ -1,21 +1,23 @@
 """
-indoor/world.py — the M0 indoor stub (Castle of Bane lineage placeholder).
+indoor/world.py — the real Castle of Bane interior, hosted as a shell guest.
 
-Milestone 0 wants "one Bane guest room — not a black screen." The *real* M0
-indoor world is the existing GL3DDungeonRenderer refactored into a guest
-renderer (the riskiest-assumption test). That extraction needs the Bane
-``wireframe_engine/bsp.py`` (BSPTree / build_bsp_from_dungeon), which isn't in
-the onramp set. Until it lands, this is a self-contained scratch room that
-exercises the *spine* end to end: first-person movement, a hazard that spends
-HP, and an exit that flips a cleared flag — so we can prove health and progress
-survive the portal today. Swapping in the real guest renderer later is a
-localized change behind this same World interface; nothing else moves.
+Milestone 2.0 (the riskiest-assumption test, cashed in): the scratch room is
+gone. This world now drives the vendored Bane engine (``az.innerworld_engine``:
+DungeonMap + BSPTree + Level) and the de-windowed wall renderer
+(``indoor/renderer.py``). It loads a real grid dungeon, walks it first-person
+with grid collision against real walls and closed doors, and hands back to the
+outer world through the portal — proving the guest renderer round-trips inside
+the shell's loop without owning a window, a timer, or the GL context.
 
-Coordinate space here is private and human-scale. Note it is +Y up: this
-scratch room owns its own convention, and since only PlayerState crosses the
-seam, that is free to differ from the real Bane wall pipeline (-Y up), which
-will live encapsulated inside the guest renderer. heading is in radians, same
-forward convention as everywhere else (forward = (sin h, -cos h)).
+NOT yet here (by M2.0 design): combat, enemies, projectiles, the staff weapon,
+and the interior HUD/minimap. Those are M2.2 (combat on shell PlayerState) and
+M2.3 (the first gunman). See README_Innerworld_Design.md.
+
+Coordinate space is Bane-native and stays sealed in this world and its
+renderer: **-Y is up** (eye at y=-15, floor y=0, ceiling y≈-60), human scale
+(CELL_SIZE=50). heading is degrees about +Y (Bane convention); forward is
+(sin h, -cos h), the same forward convention as the rest of the game. Only
+PlayerState crosses the portal — never coordinates, never the vertical axis.
 """
 
 from __future__ import annotations
@@ -23,191 +25,174 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from OpenGL.GL import (
-    GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_DEPTH_TEST, GL_LESS,
-    GL_LINE_LOOP, GL_LINES, GL_MODELVIEW, GL_PROJECTION, glBegin, glClear,
-    glClearColor, glClearDepth, glColor3f, glDepthFunc, glEnable, glEnd,
-    glLineWidth, glLoadIdentity, glMatrixMode, glRotatef, glTranslatef,
-    glVertex3f, glViewport,
+from az.innerworld_engine import (
+    CELL_SIZE, CellType, build_bsp_from_dungeon, create_test_dungeon,
 )
-from OpenGL.GLU import gluPerspective
-
+from az.indoor import renderer
 from az.shell.mode import InputState, Transition
 
-# --- room constants (human scale) -----------------------------------------
+# --- feel knobs (Bane-native per-tick constants; do NOT rescale to seconds) --
+TICK_DT = 0.016                  # 16 ms native fixed timestep (shell drives it)
+INDOOR_FORWARD_SPEED = 3.0       # world units / tick  (Bane _handle_input speed)
+INDOOR_TURN_SPEED_DEG = 2.0      # degrees / tick       (Bane _handle_input turn)
+BODY_RADIUS = 12.0               # collision radius     (Bane collision_radius)
+EYE_Y = -15.0                    # eye height in -Y-up space (Bane cam_y)
 
-ROOM_HX = 220.0              # half-extent in x
-ROOM_HZ = 220.0              # half-extent in z
-WALL_H = 70.0
-EYE_HEIGHT = 15.0
-BODY_RADIUS = 12.0
-
-MOVE_SPEED = 180.0           # units / second (~3 per 60 Hz tick)
-TURN_SPEED = 2.4             # radians / second
-
-FOV_DEG = 75.0
-NEAR, FAR = 0.5, 1000.0      # indoor far is short (Bane uses 1000)
-
-TRAP_HALF = 45.0
-TRAP_DAMAGE = 25.0
-EXIT_HALF = 45.0
-
-COL_WALL = (0.0, 0.75, 1.0)
-COL_GRID = (0.0, 0.22, 0.32)
-COL_TRAP = (1.0, 0.25, 0.2)
-COL_EXIT = (0.25, 1.0, 0.5)
+# Entry and exit cells in the test dungeon (both verified walkable):
+#   start  = (9, 9)   centre room
+#   exit   = (15, 9)  far east room — walk the east corridor to leave
+START_CELL = (9, 9)
+EXIT_CELL = (15, 9)
+EXIT_HALF = 22.0                 # action-to-leave zone half-extent (cell ≈ 50)
 
 
 class IndoorWorld:
     name = "indoor"
 
     def __init__(self) -> None:
-        self.x = 0.0
-        self.z = 0.0
-        self.heading = 0.0
+        self.dungeon = None
+        self.bsp_tree = None
+        self.cam_x = 0.0
+        self.cam_z = 0.0
+        self.cam_angle_deg = 0.0
+        self.exit_x = 0.0
+        self.exit_z = 0.0
         self._building = "tower_a"
-        self._trap_sprung = False
-
-        # trap zone (centre) and exit zone (far -Z wall)
-        self.trap_x, self.trap_z = 0.0, 0.0
-        self.exit_x, self.exit_z = 0.0, -ROOM_HZ + 55.0
+        self._accum = 0.0
 
     # --- World protocol --------------------------------------------------
 
     def on_enter(self, state, payload: dict[str, Any]) -> None:
-        # The indoor world always spins up at its own entry (no pose persists),
-        # so it does NOT implement save_pose/restore_pose.
+        """Spin up at this world's own entry. No pose persists across the seam
+        (POC §6): the interior always starts at its door."""
         self._building = payload.get("building", "tower_a")
-        self._trap_sprung = False
-        self.x, self.z = 0.0, ROOM_HZ - 50.0   # just inside the +Z wall
-        self.heading = 0.0                       # facing -Z, into the room
+        self.dungeon = create_test_dungeon()
+        self.bsp_tree = build_bsp_from_dungeon(self.dungeon)
+
+        self.cam_x, self.cam_z = self.dungeon.grid_to_world(*START_CELL)
+        self.cam_angle_deg = 0.0
+        self.exit_x, self.exit_z = self.dungeon.grid_to_world(*EXIT_CELL)
+        self._accum = 0.0
 
     def on_exit(self, state) -> None:
         pass
 
     def update(self, dt: float, inp: InputState, state) -> Transition | None:
-        if inp.left:
-            self.heading -= TURN_SPEED * dt
-        if inp.right:
-            self.heading += TURN_SPEED * dt
-
-        move = 0.0
-        if inp.forward:
-            move += MOVE_SPEED
-        if inp.back:
-            move -= MOVE_SPEED
-        if move:
-            fx, fz = math.sin(self.heading), -math.cos(self.heading)
-            nx = self.x + fx * move * dt
-            nz = self.z + fz * move * dt
-            _, self.x, self.z = self.can_move_to(nx, nz, BODY_RADIUS)
-
-        # Hazard: spend HP once on first entry into the trap zone. This is what
-        # proves, on return, that damage taken indoors persists outdoors.
-        if not self._trap_sprung and self._in_zone(self.trap_x, self.trap_z, TRAP_HALF):
-            state.take_damage(TRAP_DAMAGE)
-            self._trap_sprung = True
-
-        # Exit: stand in the exit zone and tap action -> clear + hand back.
-        if inp.action and self._in_zone(self.exit_x, self.exit_z, EXIT_HALF):
-            state.mark_cleared(self._building)
-            return Transition("outdoor", {"from": self._building})
-        return None
+        # Fixed-timestep accumulator — identical shape to OutdoorWorld.update,
+        # so engine constants stay per-tick regardless of frame dt.
+        self._accum += dt
+        steps = 0
+        transition: Transition | None = None
+        while self._accum >= TICK_DT and steps < 5:
+            transition = self._sim_tick(inp, state)
+            self._accum -= TICK_DT
+            steps += 1
+            if transition is not None:
+                self._accum = 0.0
+                break
+        return transition
 
     @property
     def spatial(self):
         return self
 
+    # --- one native sim tick (ported from Bane _handle_input) ------------
+
+    def _sim_tick(self, inp: InputState, state) -> Transition | None:
+        if inp.left:
+            self.cam_angle_deg -= INDOOR_TURN_SPEED_DEG
+        if inp.right:
+            self.cam_angle_deg += INDOOR_TURN_SPEED_DEG
+
+        rad = math.radians(self.cam_angle_deg)
+        old_x, old_z = self.cam_x, self.cam_z
+        nx, nz = old_x, old_z
+        if inp.forward:
+            nx += math.sin(rad) * INDOOR_FORWARD_SPEED
+            nz -= math.cos(rad) * INDOOR_FORWARD_SPEED
+        if inp.back:
+            nx -= math.sin(rad) * INDOOR_FORWARD_SPEED
+            nz += math.cos(rad) * INDOOR_FORWARD_SPEED
+
+        # Trial-revert slide-along (same approach as the outdoor world): if the
+        # full move is blocked, keep whichever single axis is free so a glancing
+        # wall slides instead of stopping dead.
+        if (nx, nz) != (old_x, old_z) and self._blocked(nx, nz):
+            if not self._blocked(nx, old_z):
+                nx, nz = nx, old_z
+            elif not self._blocked(old_x, nz):
+                nx, nz = old_x, nz
+            else:
+                nx, nz = old_x, old_z
+        self.cam_x, self.cam_z = nx, nz
+
+        # Exit: stand in the exit zone and tap action -> clear + hand back.
+        if inp.action and self._in_exit_zone():
+            state.mark_cleared(self._building)
+            return Transition("outdoor", {"from": self._building})
+        return None
+
     # --- SpatialQuery ----------------------------------------------------
 
     def can_move_to(self, x: float, z: float, radius: float
                     ) -> tuple[bool, float, float]:
-        lx, lz = ROOM_HX - radius, ROOM_HZ - radius
-        cx = max(-lx, min(lx, x))
-        cz = max(-lz, min(lz, z))
-        was_free = (cx == x and cz == z)
-        return was_free, cx, cz
+        """Resolve a desired position against the grid. Returns
+        (was_free, resolved_x, resolved_z). Player slide-along is handled in
+        _sim_tick (origin-aware trial-revert, mirroring the outdoor world); this
+        method answers the stateless 'can a body of this radius stand here?'
+        used by general/AI callers."""
+        free = not self._blocked(x, z, radius)
+        return (free, x, z)
 
     def line_of_sight(self, ax: float, az: float,
                       bx: float, bz: float) -> bool:
-        # Single open room, no interior occluders at M0.
+        """Grid-sampled LOS: walk the segment in half-cell steps and fail on the
+        first solid cell. Real Bane uses combat.has_line_of_sight (grid DDA);
+        this minimal version satisfies the contract until the combat port (M2.3)
+        brings the enemy that needs it."""
+        dx, dz = bx - ax, bz - az
+        dist = math.hypot(dx, dz)
+        if dist < 1e-6:
+            return True
+        step = CELL_SIZE * 0.5
+        n = max(1, int(dist / step))
+        for i in range(1, n):
+            t = i / n
+            gx, gz = self.dungeon.world_to_grid(ax + dx * t, az + dz * t)
+            if self.dungeon.is_solid(gx, gz):
+                return False
         return True
 
     # --- helpers ---------------------------------------------------------
 
-    def _in_zone(self, cx: float, cz: float, half: float) -> bool:
-        return abs(self.x - cx) <= half and abs(self.z - cz) <= half
+    def _blocked(self, x: float, z: float, radius: float = BODY_RADIUS) -> bool:
+        """Grid collision: sample the body centre plus four cardinal offsets at
+        ``radius``; blocked if any sample is non-walkable or a closed door
+        (ported from Bane _handle_input's collision check)."""
+        for dx, dz in ((0.0, 0.0), (radius, 0.0), (-radius, 0.0),
+                       (0.0, radius), (0.0, -radius)):
+            gx, gz = self.dungeon.world_to_grid(x + dx, z + dz)
+            if not self.dungeon.is_walkable(gx, gz):
+                return True
+            if self.dungeon.get_cell(gx, gz) == CellType.DOOR:
+                return True   # closed doors block (opened doors become FLOOR)
+        return False
+
+    def _in_exit_zone(self) -> bool:
+        return (abs(self.cam_x - self.exit_x) <= EXIT_HALF and
+                abs(self.cam_z - self.exit_z) <= EXIT_HALF)
 
     def status_text(self, state) -> str:
-        if self._in_zone(self.exit_x, self.exit_z, EXIT_HALF):
+        if self._in_exit_zone():
             return "EXIT — press E to leave the tower"
-        if self._trap_sprung:
-            return f"hazard triggered (-{int(TRAP_DAMAGE)} HP) — find the exit (green)"
-        return "move: W/S  turn: A/D   reach the green exit at the far wall"
+        return "move: W/S  turn: A/D   reach the green exit (far east room)"
 
-    # --- draw (the only GL surface) -------------------------------------
+    # --- draw ------------------------------------------------------------
 
     def draw(self, vp_w: int, vp_h: int) -> None:
-        glClearColor(0.0, 0.0, 0.0, 1.0)
-        glClearDepth(1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        glEnable(GL_DEPTH_TEST)
-        glDepthFunc(GL_LESS)
-        glViewport(0, 0, vp_w, max(vp_h, 1))
-
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluPerspective(FOV_DEG, vp_w / max(vp_h, 1), NEAR, FAR)
-
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        glRotatef(math.degrees(self.heading), 0.0, 1.0, 0.0)
-        glTranslatef(-self.x, -EYE_HEIGHT, -self.z)
-
-        self._draw_floor_grid()
-        self._draw_walls()
-        self._draw_floor_marker(self.trap_x, self.trap_z, TRAP_HALF, COL_TRAP)
-        self._draw_floor_marker(self.exit_x, self.exit_z, EXIT_HALF, COL_EXIT)
-
-    def _draw_floor_grid(self) -> None:
-        glLineWidth(1.0)
-        glColor3f(*COL_GRID)
-        step = 40.0
-        glBegin(GL_LINES)
-        nx = int(ROOM_HX / step)
-        nz = int(ROOM_HZ / step)
-        for i in range(-nx, nx + 1):
-            x = i * step
-            glVertex3f(x, 0.0, -ROOM_HZ); glVertex3f(x, 0.0, ROOM_HZ)
-        for j in range(-nz, nz + 1):
-            z = j * step
-            glVertex3f(-ROOM_HX, 0.0, z); glVertex3f(ROOM_HX, 0.0, z)
-        glEnd()
-
-    def _draw_walls(self) -> None:
-        glLineWidth(2.0)
-        glColor3f(*COL_WALL)
-        x0, x1 = -ROOM_HX, ROOM_HX
-        z0, z1 = -ROOM_HZ, ROOM_HZ
-        # top and bottom rectangles
-        for y in (0.0, WALL_H):
-            glBegin(GL_LINE_LOOP)
-            glVertex3f(x0, y, z0); glVertex3f(x1, y, z0)
-            glVertex3f(x1, y, z1); glVertex3f(x0, y, z1)
-            glEnd()
-        # vertical edges
-        glBegin(GL_LINES)
-        for cx, cz in ((x0, z0), (x1, z0), (x1, z1), (x0, z1)):
-            glVertex3f(cx, 0.0, cz); glVertex3f(cx, WALL_H, cz)
-        glEnd()
-
-    def _draw_floor_marker(self, cx: float, cz: float, half: float,
-                           color: tuple[float, float, float]) -> None:
-        glLineWidth(2.0)
-        glColor3f(*color)
-        glBegin(GL_LINE_LOOP)
-        glVertex3f(cx - half, 0.5, cz - half)
-        glVertex3f(cx + half, 0.5, cz - half)
-        glVertex3f(cx + half, 0.5, cz + half)
-        glVertex3f(cx - half, 0.5, cz + half)
-        glEnd()
+        renderer.draw_interior(
+            dungeon=self.dungeon, bsp_tree=self.bsp_tree,
+            cam_x=self.cam_x, cam_y=EYE_Y, cam_z=self.cam_z,
+            cam_angle_deg=self.cam_angle_deg, vp_w=vp_w, vp_h=vp_h,
+            exit_world=(self.exit_x, self.exit_z), exit_half=EXIT_HALF,
+        )
