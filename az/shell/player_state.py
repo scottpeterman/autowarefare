@@ -66,6 +66,12 @@ class PlayerState:
     def is_invulnerable(self) -> bool:
         return self.invuln_ticks > 0
 
+    @property
+    def is_game_over(self) -> bool:
+        """True once every life is spent — a terminal state. The world freezes
+        on it; only a shell-level restart (a fresh PlayerState) clears it."""
+        return self.lives <= 0
+
     def take_damage(self, amount: float) -> float:
         """Apply ``amount`` of damage unless in post-respawn grace. Returns the
         damage actually applied (0.0 if ignored). Triggers the HUD flash."""
@@ -83,7 +89,16 @@ class PlayerState:
 
     def lose_life(self) -> bool:
         """Spend a life and respawn at full health with grace. Returns True if
-        that was the last life (game over)."""
+        the game is over (no lives left).
+
+        Idempotent at the terminal: once lives are spent, calling it again is a
+        no-op that keeps returning True. This is what stops a damage source that
+        connects every tick — enemy fire outdoors, a hazard indoors — from
+        re-entering on a corpse (``is_dead`` stays true at 0 lives) and driving
+        lives negative. The guard lives here, in the shared pool, so every
+        caller across both worlds inherits it."""
+        if self.lives <= 0:
+            return True
         self.lives -= 1
         if self.lives <= 0:
             self.health = 0.0

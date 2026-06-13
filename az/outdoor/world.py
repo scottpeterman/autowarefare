@@ -402,6 +402,13 @@ class OutdoorWorld:
     # --- one native sim tick (ported from game._tick / _handle_input) ----
 
     def _sim_tick(self, inp: InputState, state) -> Transition | None:
+        # Terminal state: once every life is spent the battlefield freezes —
+        # input is ignored, enemies hold, and (critically) the damage path below
+        # never re-enters lose_life on a corpse. Restart is a shell concern (a
+        # fresh PlayerState); this world just stops driving.
+        if state.is_game_over:
+            return None
+
         cam = self.camera
 
         # turn, then move (BZ order)
@@ -540,6 +547,8 @@ class OutdoorWorld:
                           self.camera.z - self._lobby.z) <= ENTER_RANGE
 
     def status_text(self, state) -> str:
+        if state.is_game_over:
+            return f"GAME OVER  —  no lives remaining   (SCORE {state.score:06d})"
         if self._near_lobby():
             tag = "cleared" if state.has_cleared(TOWER_ID) else "uncleared"
             return f"TOWER LOBBY ({tag}) — press E to enter"
