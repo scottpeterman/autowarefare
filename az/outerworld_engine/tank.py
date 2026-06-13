@@ -30,10 +30,15 @@ later — the kill loop is already wired, the explosion is purely visual.
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .obstacle import model_radius_2d
+
+if TYPE_CHECKING:
+    from az.common.weapon import Loadout
 
 
 @dataclass
@@ -55,9 +60,11 @@ class Tank:
                   values per JS source: 'patrol', 'patrolrotate',
                   'chase', 'lookchase', 'evade'.
 
-    Tanks are one-hit kills (arcade rule). There's no health, no shields,
-    no damage state. If a bullet's bounding circle overlaps a tank's,
-    the tank is removed from ``Battlefield.tanks`` on that tick.
+    Tanks carry ``hp``/``max_hp`` (M1 increment 3). A player bullet subtracts
+    its ``damage`` from ``hp``; the tank is removed from ``Battlefield.tanks``
+    (and bursts into fragments) only when ``hp <= 0``. The bare engine default
+    ``max_hp = 1.0`` keeps the arcade one-hit kill for an unspecified tank;
+    real per-vehicle HP is data supplied by the spawner.
     """
 
     model: dict
@@ -65,6 +72,22 @@ class Tank:
     z: float
     heading: float = 0.0
     scale: float = 1.0
+
+    # Health (M1 increment 3). A bullet subtracts its ``damage`` from ``hp``;
+    # the tank dies (fragments + score) only at ``hp <= 0``. Default 1.0
+    # preserves the arcade one-hit kill for a bare engine tank — real per-
+    # vehicle HP is supplied as data by the spawner (the three-vehicle defs
+    # land in increment 4; until then the outdoor roster sets it explicitly).
+    max_hp: float = 1.0
+    hp: float = 1.0
+
+    # The enemy's weapon(s), as the SAME Loadout the player carries — an enemy
+    # is "a vehicle + AI" the way the player is "a vehicle + input" (vision §6).
+    # None = unarmed (the increment-1/2 behavior). When set and the AI raises
+    # ``ai_wants_fire``, the world fires it owner='enemy' through the shared
+    # weapon abstraction. Typed under TYPE_CHECKING so the engine keeps no
+    # runtime import of common.weapon.
+    loadout: "Loadout | None" = None
 
     # AI state — slice 1 of the enemytank.js port lands the FSM in
     # bz/battlefield_engine/tank_ai.py. Reserved values per JS source
@@ -105,6 +128,22 @@ class Tank:
         # Carried as a non-dataclass attribute so dataclass __eq__ /
         # __repr__ ignore it.
         self._rng = random.Random(self.ai_seed)
+
+    @property
+    def forward(self) -> tuple[float, float]:
+        """Unit forward vector in world XZ — ``(sin(h), -cos(h))``, matching
+        Camera.forward and ``tank_ai._try_move_forward``. The shared Weapon's
+        ``try_fire`` reads ``shooter.forward`` to aim the round, so an enemy
+        tank fires through the exact same geometry the player does."""
+        return (math.sin(self.heading), -math.cos(self.heading))
+
+    @property
+    def hp_fraction(self) -> float:
+        """0.0–1.0, for the wireframe damage tint (no HUD — read off the
+        model's color as it takes hits)."""
+        if self.max_hp <= 0:
+            return 0.0
+        return max(0.0, min(1.0, self.hp / self.max_hp))
 
     @property
     def bounding_radius(self) -> float:

@@ -64,6 +64,13 @@ class ProjectileSpec:
     radius: float = 1.0     # 2D collision radius (independent of scale)
     spawn_offset: float = 12.0   # spawned this far ahead of the shooter
     fly_height: float = 6.0      # world Y the round flies at (gun level)
+    damage: float = 1.0     # HP removed from the target on hit. The ONE fact
+                            # that separates the weapons once targets have HP:
+                            # the shell hits hard, the pulse chips. Default 1.0
+                            # = the arcade one-hit kill against a default-HP
+                            # (1.0) target, so an unspecified spec stays lethal.
+                            # The same field the indoor weapon (M2.3) will use —
+                            # this is load-bearing for both engines.
 
 
 # A world hands the weapon a factory that builds *its* projectile type from a

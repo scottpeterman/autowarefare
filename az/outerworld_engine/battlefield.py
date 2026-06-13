@@ -126,29 +126,41 @@ class Battlefield:
         player_x: float = 0.0,
         player_z: float = 0.0,
         player_radius: float = 6.0,
-    ) -> tuple[bool, list[Tank]]:
+    ) -> tuple[float, list[Tank], list[Tank]]:
         """Advance all bullets one tick, removing any that have expired.
 
-        Returns ``(player_hit, killed_tanks)`` — a bool for whether an
-        enemy bullet hit the player, and the list of Tank objects killed
-        this tick (with their death positions intact for explosion spawn).
+        Returns ``(player_damage, killed_tanks, damaged_tanks)``:
+          - ``player_damage`` — total HP worth of enemy fire that connected
+            with the player this tick (0.0 if none). The caller routes this to
+            ``PlayerState.take_damage`` — the shell pool, not the engine, owns
+            what a hit *means* (grace, lives, game over).
+          - ``killed_tanks`` — Tanks whose ``hp`` reached 0 this tick, with
+            their death positions intact for the fragment burst + score.
+          - ``damaged_tanks`` — Tanks that took a non-lethal hit this tick
+            (for hit feedback: a small fragment spit / the damage tint reading
+            off ``hp_fraction``). A tank may appear here once per connecting
+            round; it never also appears in ``killed_tanks`` the same tick.
 
         Five expiry conditions, checked in order per bullet:
           1. Range exhausted (``range_remaining <= 0``)
           2. Out of world bounds (the play square)
-          3. Player bullet → hit a tank (kills the tank)
-          4. Enemy bullet → hit the player (returns True)
+          3. Player bullet → hit a tank (subtracts ``damage``; kills at hp<=0)
+          4. Enemy bullet → hit the player (accumulates ``damage``)
           5. Hit an obstacle (indestructible — bullet just despawns)
 
         Ownership-aware: player bullets only test against tanks; enemy
         bullets only test against the player. Both despawn on obstacles.
+        A bullet that connects (lethal or not) is consumed — one round, one
+        hit, then it's gone, same as before; only the *effect* changed from
+        instant-kill to damage subtraction.
 
         Mutates ``self.bullets`` and ``self.tanks`` in place.
         """
         surviving_bullets: list[Bullet] = []
         killed_tanks: set[int] = set()
         killed_tank_list: list[Tank] = []
-        player_hit = False
+        damaged_tank_list: list[Tank] = []
+        player_damage = 0.0
 
         for b in self.bullets:
             b.step()
@@ -159,19 +171,23 @@ class Battlefield:
                 continue
 
             if b.owner == 'player':
-                # Player bullets hit tanks (destructible targets).
+                # Player bullets damage tanks (destructible targets).
                 hit_tank = self._bullet_hits_tank(b, killed_tanks)
                 if hit_tank is not None:
-                    killed_tanks.add(id(hit_tank))
-                    killed_tank_list.append(hit_tank)
-                    continue
+                    hit_tank.hp -= b.damage
+                    if hit_tank.hp <= 0:
+                        killed_tanks.add(id(hit_tank))
+                        killed_tank_list.append(hit_tank)
+                    else:
+                        damaged_tank_list.append(hit_tank)
+                    continue  # the round is spent on the hit either way
             elif b.owner == 'enemy':
                 # Enemy bullets hit the player.
                 dx = b.x - player_x
                 dz = b.z - player_z
                 r = b.bounding_radius + player_radius
                 if dx * dx + dz * dz < r * r:
-                    player_hit = True
+                    player_damage += b.damage
                     continue
 
             # Both player and enemy bullets despawn on obstacles.
@@ -184,7 +200,7 @@ class Battlefield:
         if killed_tanks:
             self.tanks = [t for t in self.tanks if id(t) not in killed_tanks]
 
-        return player_hit, killed_tank_list
+        return player_damage, killed_tank_list, damaged_tank_list
 
     def step_fragments(self) -> None:
         """Advance all fragments one tick, removing expired ones."""

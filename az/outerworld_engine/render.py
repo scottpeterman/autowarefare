@@ -271,6 +271,18 @@ def draw_tank(tank: Tank, r: float, g: float, b: float) -> None:
     if tank.heading:
         glRotatef(-math.degrees(tank.heading), 0.0, 1.0, 0.0)
 
+    # Damage tint (M1 increment 3): a full-HP tank renders in the world color;
+    # as it takes hits the wireframe lerps toward a hot orange-red and brightens
+    # slightly, so health reads straight off the model with no HUD. A default
+    # one-hit tank (max_hp 1.0) never shows damaged — it dies on the first hit.
+    frac = tank.hp_fraction
+    if frac < 1.0:
+        t = 1.0 - frac                       # 0 = pristine, 1 = near death
+        hot_r, hot_g, hot_b = 1.0, 0.35, 0.2
+        r = r + (hot_r - r) * t
+        g = g + (hot_g - g) * t
+        b = b + (hot_b - b) * t
+
     glColor3f(r, g, b)
     glBegin(GL_LINES)
     for (x1, y1, z1), (x2, y2, z2) in model['lines']:

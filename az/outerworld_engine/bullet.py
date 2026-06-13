@@ -82,6 +82,11 @@ class Bullet:
                                 # this bullet can hit. Player bullets
                                 # hit tanks; enemy bullets hit the player.
                                 # Both despawn on obstacles.
+    damage: float = 1.0         # HP subtracted from whatever this round hits.
+                                # Carried from the firing weapon's ProjectileSpec
+                                # (see common.weapon). Default 1.0 = arcade
+                                # one-hit kill vs a default-HP target, so a
+                                # hand-built Bullet with no damage stays lethal.
 
     def step(self) -> None:
         """Advance one tick: move by (vx, vz), decrement range.

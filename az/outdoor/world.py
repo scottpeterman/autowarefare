@@ -32,12 +32,19 @@ from az.outerworld_engine import render
 from az.outerworld_engine.battlefield import Battlefield
 from az.outerworld_engine.bullet import Bullet
 from az.outerworld_engine.camera import Camera
+from az.outerworld_engine.fragment import Fragment
 from az.outerworld_engine.obstacle import Obstacle
 from az.outerworld_engine.tank import Tank
 from az.outerworld_engine.models.cube_model import CUBE_MODEL
 from az.outerworld_engine.models.platform_model import PLATFORM_MODEL
 from az.outerworld_engine.models.tank_model import TANK_MODEL
 from az.outerworld_engine.models.tetra_model import TETRA_MODEL
+from az.outerworld_engine.models.texplode1_model import TEXPLODE1_MODEL
+from az.outerworld_engine.models.texplode2_model import TEXPLODE2_MODEL
+from az.outerworld_engine.models.texplode3_model import TEXPLODE3_MODEL
+from az.outerworld_engine.models.texplode4_model import TEXPLODE4_MODEL
+from az.outerworld_engine.models.texplode5_model import TEXPLODE5_MODEL
+from az.outerworld_engine.models.texplode6_model import TEXPLODE6_MODEL
 from az.outdoor.models.buildings import (
     DOORWAY, LARGE_BUILDING, SKYSCRAPER, SMALL_BUILDING, WAREHOUSE,
 )
@@ -83,6 +90,32 @@ BULLET_SPAWN_OFFSET = 12.0
 BULLET_Y = 4.5
 
 TANK_SCORE = 1000
+
+# --- damage model (M1 increment 3) -----------------------------------------
+# One unified economy: every damage source mutates one pool. The player pool is
+# PlayerState (max 100). These are STARTING POINTS to tune by feel in the
+# window, derived from the concept-sheet archetypes — not defaults handed down.
+#
+#   Player weapons (vs enemy HP):
+#     shell 60  → a Sedan (hp 40) one-shots, a Flatbed (hp 80) takes two,
+#                 a Pickup (hp 120) takes two and a chip.
+#     pulse 12  → ~4 hits on a Sedan, a long heat-limited burn on a Pickup
+#                 (making pulse the *wrong* tool for the bruiser — the point).
+#   Enemy weapon (vs the player's pool of 100):
+#     shell 25  → ~4 clean hits spend a life. pulse-chip enemies come with the
+#                 three-vehicle roster in increment 4.
+#   Generic roster HP (this increment, before the per-vehicle defs land):
+#     the two TANK_MODEL autos get ENEMY_TANK_HP so the chip-down is visible;
+#     increment 4 replaces this with the Sedan/Pickup/Flatbed hp values.
+SHELL_DAMAGE = 60.0
+PULSE_DAMAGE = 12.0
+ENEMY_SHELL_DAMAGE = 25.0
+ENEMY_TANK_HP = 80.0
+
+# The enemy shell emerges from the front of the ~27u-radius tank hull, so its
+# spawn offset is larger than the player's (the player is a first-person eye,
+# not a 48u body). Speed/range/look mirror the player shell.
+ENEMY_SHELL_SPAWN_OFFSET = 34.0
 
 # --- pulse rifle (rapid-fire weapon, M1 inc 2) -----------------------------
 # Faster, lighter, shorter-reaching round than the shell — a tracer streak the
@@ -136,6 +169,7 @@ def _bz_bullet_factory(spec: ProjectileSpec, x: float, z: float, y: float,
         model=spec.model, x=x, z=z, y=y, vx=vx, vz=vz,
         range_remaining=spec.max_range, heading=heading,
         scale=spec.scale, bounding_radius=spec.radius, owner=owner,
+        damage=spec.damage,
     )
 
 
@@ -153,6 +187,7 @@ def _shell_weapon() -> Weapon:
             radius=BULLET_RADIUS,
             spawn_offset=BULLET_SPAWN_OFFSET,
             fly_height=BULLET_Y,
+            damage=SHELL_DAMAGE,
         ),
         control=BallisticFireControl(),
         make_projectile=_bz_bullet_factory,
@@ -175,6 +210,7 @@ def _pulse_weapon() -> Weapon:
             radius=TRACER_RADIUS,
             spawn_offset=TRACER_SPAWN_OFFSET,
             fly_height=TRACER_Y,
+            damage=PULSE_DAMAGE,
         ),
         control=HeatFireControl(
             cadence_ticks=5,        # 12 rounds/sec @ 60 Hz
@@ -186,14 +222,74 @@ def _pulse_weapon() -> Weapon:
     )
 
 
+def _enemy_shell_weapon() -> Weapon:
+    """The enemy auto's gun — the SAME Weapon abstraction the player carries,
+    just with an enemy-tuned spec and fired owner='enemy'. The ballistic gate
+    gives each enemy the one-shell-on-screen rule the AI already assumes
+    (``enemy_bullet_in_flight``), and the round emerges from the front of the
+    tank hull. The three-vehicle roster (increment 4) swaps the spec/control
+    per chassis — Sedan a heat pulse, Pickup this shell, Flatbed both."""
+    return Weapon(
+        name="enemy-shell",
+        spec=ProjectileSpec(
+            model=SHELL_MODEL,
+            speed=BULLET_SPEED,
+            max_range=BULLET_RANGE,
+            scale=BULLET_MODEL_SCALE,
+            radius=BULLET_RADIUS,
+            spawn_offset=ENEMY_SHELL_SPAWN_OFFSET,
+            fly_height=BULLET_Y,
+            damage=ENEMY_SHELL_DAMAGE,
+        ),
+        control=BallisticFireControl(),
+        make_projectile=_bz_bullet_factory,
+    )
+
+
+def _enemy_loadout() -> Loadout:
+    """One enemy auto's weapons — a single ballistic shell for this increment.
+    Each tank gets its own Loadout instance (own fire-control state)."""
+    return Loadout([_enemy_shell_weapon()])
+
+
+# fragment palette for the kill burst / hit spit
+_TEXPLODE_MODELS = (
+    TEXPLODE1_MODEL, TEXPLODE2_MODEL, TEXPLODE3_MODEL,
+    TEXPLODE4_MODEL, TEXPLODE5_MODEL, TEXPLODE6_MODEL,
+)
+
+
+def _spawn_burst(battlefield: Battlefield, x: float, z: float,
+                 count: int, rng) -> None:
+    """Shatter into wireframe shards at (x, z) — the arcade tank death (and,
+    with a small count, the non-lethal hit spit). Each shard flies outward with
+    a random velocity, arcs under gravity (Fragment owns that), and tumbles on
+    two axes. Purely visual; fragments carry no collision."""
+    for _ in range(count):
+        model = rng.choice(_TEXPLODE_MODELS)
+        ang = rng.uniform(0.0, 2.0 * math.pi)
+        speed = rng.uniform(0.6, 1.8)
+        battlefield.add_fragment(Fragment(
+            model=model,
+            x=x, y=rng.uniform(4.0, 12.0), z=z,
+            vx=math.sin(ang) * speed,
+            vy=rng.uniform(0.8, 2.0),
+            vz=-math.cos(ang) * speed,
+            spin_y=rng.uniform(-0.3, 0.3),
+            spin_x=rng.uniform(-0.3, 0.3),
+        ))
+
+
 class OutdoorWorld:
     name = "outdoor"
 
     def __init__(self) -> None:
+        import random
         self.battlefield = Battlefield(half_size=WORLD_HALF_SIZE)
         self.camera = Camera(x=0.0, z=0.0, heading=0.0)
         self.time_sec = 0.0
         self._accum = 0.0
+        self._fx_rng = random.Random(20240613)   # fragment burst/spit jitter
 
         self._populate_city()      # buildings + skyscraper + lobby trigger
         self._populate_scene()     # terrain debris, kept clear of footprints
@@ -251,12 +347,19 @@ class OutdoorWorld:
         place(PLATFORM_MODEL, 3)
 
     def _populate_tanks(self) -> None:
-        # Two enemy autos forward of spawn. They roam (AI ticks) and can be
-        # killed for score; they do NOT fire yet (increment 2 + damage model).
+        # Two enemy autos forward of spawn. They roam (AI ticks), can be chipped
+        # down (HP) and killed for score, and now FIRE BACK — each carries the
+        # same Weapon/Loadout the player does, fired owner='enemy'. Generic
+        # TANK_MODEL hull + ENEMY_TANK_HP for this increment; the per-chassis
+        # Sedan/Pickup/Flatbed defs replace these in increment 4.
         self.battlefield.add_tank(Tank(model=TANK_MODEL, x=-150.0, z=-350.0,
-                                       ai_seed=1))
+                                       ai_seed=1, max_hp=ENEMY_TANK_HP,
+                                       hp=ENEMY_TANK_HP,
+                                       loadout=_enemy_loadout()))
         self.battlefield.add_tank(Tank(model=TANK_MODEL, x=220.0, z=-300.0,
-                                       ai_seed=2))
+                                       ai_seed=2, max_hp=ENEMY_TANK_HP,
+                                       hp=ENEMY_TANK_HP,
+                                       loadout=_enemy_loadout()))
 
     # --- World protocol --------------------------------------------------
 
@@ -332,19 +435,42 @@ class OutdoorWorld:
         # heat cooling), so a holstered rifle still cools while the shell is up.
         self.loadout.tick()
 
-        # enemy AI moves the tanks; enemy fire is intentionally NOT wired yet.
+        # enemy AI moves the tanks and decides whether each wants to fire.
         self.battlefield.step_tanks(cam.x, cam.z, cam.heading)
+        # enemy fire (increment 3): a tank that wants to fire emits an
+        # owner='enemy' round through its OWN Loadout — the same Weapon
+        # abstraction the player uses, just owner-tagged. Every armed tank ticks
+        # its fire-control each frame so cooldowns/heat advance even when idle.
         for t in self.battlefield.tanks:
-            t.ai_wants_fire = False   # consume the fire intent — no enemy bullets
+            if t.loadout is not None:
+                if t.ai_wants_fire:
+                    t.loadout.active.try_fire(True, t, self.battlefield,
+                                              owner="enemy")
+                t.loadout.tick()
+            t.ai_wants_fire = False   # intent consumed this tick
 
-        # advance bullets; player bullets kill tanks -> score via PlayerState
-        tanks_before = len(self.battlefield.tanks)
-        _player_hit, _killed = self.battlefield.step_bullets(
+        # advance bullets. Player rounds chip tank HP (kill at 0 -> score +
+        # fragment burst); enemy rounds chip the shared PlayerState pool.
+        player_damage, killed, damaged = self.battlefield.step_bullets(
             player_x=cam.x, player_z=cam.z, player_radius=PLAYER_RADIUS)
-        kills = tanks_before - len(self.battlefield.tanks)
-        if kills > 0:
-            state.add_score(kills * TANK_SCORE)
-        # _player_hit is always False here (no enemy bullets); damage model TBD.
+
+        if killed:
+            state.add_score(len(killed) * TANK_SCORE)
+            for t in killed:
+                _spawn_burst(self.battlefield, t.x, t.z, 9, self._fx_rng)
+        for t in damaged:
+            # non-lethal hit: a small spit of shards reads the chip even before
+            # the damage tint (which draw_tank pulls from hp_fraction).
+            _spawn_burst(self.battlefield, t.x, t.z, 2, self._fx_rng)
+
+        # player damage routes through the shell-owned pool — the one place a
+        # hit *means* something (grace, lives, game over). take_damage no-ops
+        # during respawn invulnerability; a hit that empties the pool spends a
+        # life (respawn at full + grace in place; 0 lives -> game over flag).
+        if player_damage > 0.0:
+            state.take_damage(player_damage)
+            if state.is_dead:
+                state.lose_life()
 
         self.battlefield.step_fragments()
 
