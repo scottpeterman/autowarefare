@@ -58,20 +58,22 @@ if TYPE_CHECKING:
 
 # --- Tunables ----------------------------------------------------------------
 
-# Per-tick movement (60 Hz game loop).
+# Per-chassis handling now lives on the Tank (M1 increment 4): ``move_speed``
+# (top/chase speed, u/tick), ``turn_speed_deg``, and ``engage_distance``. The
+# pre-increment-4 single-tank reference was move 0.35 / turn 0.65 / engage 600,
+# which remain the Tank field defaults — so an unspecified tank drives exactly
+# as before, and a VehicleDef makes a Sedan quick or a Pickup ponderous by
+# overriding those three.
 #
-# Tanks should feel decisively slower than the player (player.forward
-# = 0.65/tick = ~40 u/sec) so the player can outrun a chasing tank by
-# reversing — that's the arcade feel. "Tanks move slightly slower than
-# the player's tank" per multiple sources. Patrol at ~1/3 player speed,
-# chase at ~1/2 player speed.
-TANK_PATROL_SPEED = 0.22       # u/tick (~14 u/sec, ~34% of player)
-TANK_CHASE_SPEED = 0.35        # u/tick (~22 u/sec, ~54% of player)
-
-# Turn speed. Slower than player's 0.8°/tick (50°/sec) so the player
-# can outpace a tank's slew by orbiting it. A tank that turns faster
-# than the player is unkitable and reads as cheating.
-TANK_TURN_SPEED_DEG = 0.65     # ~40°/sec
+# Patrol speed, evade speed, evade turn rate, and the disengage range stay fixed
+# FRACTIONS of the chassis knobs rather than separate per-vehicle numbers, so a
+# fast chassis is fast in every state. The ratios below reproduce the old
+# absolutes exactly against the reference chassis (0.22/0.35, 0.30/0.35,
+# 0.90/0.65, 800/600).
+PATROL_SPEED_RATIO = 0.22 / 0.35    # patrol ≈ 63% of top speed
+EVADE_SPEED_RATIO = 0.30 / 0.35     # evade  ≈ 86% of top speed
+EVADE_TURN_RATIO = 0.90 / 0.65      # evade turn ≈ 138% of base turn
+DISENGAGE_RATIO = 800.0 / 600.0     # disengage hysteresis = 133% of engage
 
 # Chase aim gate. A tank in chase only advances when its heading is
 # within this tolerance of the bearing-to-player. Above tolerance,
@@ -93,12 +95,10 @@ PATROLROTATE_TICKS_MAX = 180   # 3.0 sec safety cap
 LOOKCHASE_TICKS_MIN = 30       # 0.5 sec
 LOOKCHASE_TICKS_MAX = 90       # 1.5 sec
 
-# Engagement distances (world units). The hysteresis (engage <
-# disengage) is intentional — without it, a tank chasing at exactly
-# ENGAGE_DISTANCE would oscillate between chase and patrol every
-# few ticks as the distance jitters around the threshold.
-ENGAGE_DISTANCE = 600.0
-DISENGAGE_DISTANCE = 800.0
+# Engagement distance is now per-chassis (``tank.engage_distance``); the
+# disengage threshold is ``engage * DISENGAGE_RATIO`` (hysteresis is intentional
+# — without it a tank chasing at exactly the engage distance would oscillate
+# between chase and patrol as the distance jitters around the threshold).
 CHASE_MIN_DISTANCE = 60.0      # if closer, switch to lookchase so the
                                # tank doesn't drive *through* the player.
 
@@ -116,18 +116,11 @@ P_CHASE_TO_LOOKCHASE = 0.01
 # A tank inside this cone is *in the crosshairs* and should dodge.
 EVADE_CONE_HALF_DEG = 15.0
 
-# Evade speed. Slightly below chase speed — the tank is dodging,
-# not sprinting. The point is lateral displacement (getting out of
-# the cone), not raw distance. If this is too fast the tank feels
-# twitchy; too slow and it can't clear the cone before the player
-# tracks and fires.
-EVADE_SPEED = 0.30             # u/tick (~19 u/sec, ~46% of player)
-
-# Evade turn speed. Slightly faster than normal turn so the tank
-# snaps to its escape heading promptly. Without this boost, a tank
-# entering evade with a bad heading spends too many ticks pivoting
-# and not enough actually moving laterally.
-EVADE_TURN_SPEED_DEG = 0.90    # ~56°/sec (vs 40°/sec normal)
+# Evade speed and turn are fractions of the chassis knobs (EVADE_SPEED_RATIO /
+# EVADE_TURN_RATIO above), so a fast chassis dodges fast. The point is lateral
+# displacement (clearing the cone), not raw distance; evade turn runs a touch
+# above the chassis turn rate so the tank snaps to its escape heading promptly
+# and spends its evade ticks moving, not pivoting.
 
 # Minimum ticks in evade before re-checking the cone. Prevents
 # oscillation at the cone boundary — without this, a tank at the
@@ -236,12 +229,12 @@ def tick_tank(
     # Hysteresis (engage < disengage) prevents thrashing at the boundary.
     if (
         tank.ai_mode in ('patrol', 'patrolrotate')
-        and dist_to_player < ENGAGE_DISTANCE
+        and dist_to_player < tank.engage_distance
     ):
         _enter_chase(tank)
     elif (
         tank.ai_mode in ('chase', 'lookchase', 'evade')
-        and dist_to_player > DISENGAGE_DISTANCE
+        and dist_to_player > tank.engage_distance * DISENGAGE_RATIO
     ):
         _enter_patrol(tank)
 
@@ -266,7 +259,7 @@ def tick_tank(
     if (
         tank.ai_mode in ('chase', 'lookchase')
         and in_cone
-        and dist_to_player < DISENGAGE_DISTANCE
+        and dist_to_player < tank.engage_distance * DISENGAGE_RATIO
     ):
         # Fire-then-evade: lookchase tank gets one fire check before
         # breaking into evade. The aim tolerance is already met (it's
@@ -397,7 +390,8 @@ def _tick_patrol(
         _enter_patrolrotate(tank, _random_heading(tank))
         return
 
-    if not _try_move_forward(tank, battlefield, TANK_PATROL_SPEED):
+    if not _try_move_forward(tank, battlefield,
+                             tank.move_speed * PATROL_SPEED_RATIO):
         # Blocked by obstacle or world bound. Pivot — picking a new
         # random heading rather than e.g. "the heading away from the
         # blocker" because the random pick reads more like the arcade
@@ -409,7 +403,7 @@ def _tick_patrol(
 
 def _tick_patrolrotate(tank: Tank) -> None:
     """Rotate toward ai_target_heading; resume patrol when aligned."""
-    step = math.radians(TANK_TURN_SPEED_DEG)
+    step = math.radians(tank.turn_speed_deg)
     delta = _angle_diff(tank.ai_target_heading, tank.heading)
 
     if abs(delta) <= step:
@@ -473,7 +467,7 @@ def _tick_chase(
         # toward the player on subsequent ticks; either it finds an
         # unblocked angle or it stays glued to cover. Obstacle-aware
         # path-around routing would be a slice 1.5+ feature.
-        _try_move_forward(tank, battlefield, TANK_CHASE_SPEED)
+        _try_move_forward(tank, battlefield, tank.move_speed)
 
 
 def _tick_lookchase(
@@ -545,7 +539,7 @@ def _tick_evade(
     here — this function just moves.
     """
     # Turn toward escape heading at the boosted evade turn rate.
-    step = math.radians(EVADE_TURN_SPEED_DEG)
+    step = math.radians(tank.turn_speed_deg * EVADE_TURN_RATIO)
     delta = _angle_diff(tank.ai_target_heading, tank.heading)
 
     if abs(delta) <= step:
@@ -558,7 +552,8 @@ def _tick_evade(
     # Advance along current heading (not target — lets the tank start
     # displacing even while still pivoting, as long as the heading is
     # close enough to perpendicular that forward motion is useful).
-    if not _try_move_forward(tank, battlefield, EVADE_SPEED):
+    if not _try_move_forward(tank, battlefield,
+                             tank.move_speed * EVADE_SPEED_RATIO):
         # Blocked — flip escape heading to the other perpendicular.
         # The bearing from player to tank gives the axis; the current
         # target is one perp, the other is 180° away from it along
@@ -611,12 +606,12 @@ def _random_heading(tank: Tank) -> float:
 
 
 def _turn_toward(tank: Tank, target_heading: float) -> None:
-    """Step the tank's heading toward target by at most TANK_TURN_SPEED_DEG.
+    """Step the tank's heading toward target by at most its turn rate.
 
     Snap-to-target if the remaining delta is smaller than one step
     (otherwise the tank one-tick-oscillates around the target).
     """
-    step = math.radians(TANK_TURN_SPEED_DEG)
+    step = math.radians(tank.turn_speed_deg)
     delta = _angle_diff(target_heading, tank.heading)
 
     if abs(delta) <= step:

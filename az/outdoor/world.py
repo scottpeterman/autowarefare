@@ -30,14 +30,11 @@ from typing import Any
 
 from az.outerworld_engine import render
 from az.outerworld_engine.battlefield import Battlefield
-from az.outerworld_engine.bullet import Bullet
 from az.outerworld_engine.camera import Camera
 from az.outerworld_engine.fragment import Fragment
 from az.outerworld_engine.obstacle import Obstacle
-from az.outerworld_engine.tank import Tank
 from az.outerworld_engine.models.cube_model import CUBE_MODEL
 from az.outerworld_engine.models.platform_model import PLATFORM_MODEL
-from az.outerworld_engine.models.tank_model import TANK_MODEL
 from az.outerworld_engine.models.tetra_model import TETRA_MODEL
 from az.outerworld_engine.models.texplode1_model import TEXPLODE1_MODEL
 from az.outerworld_engine.models.texplode2_model import TEXPLODE2_MODEL
@@ -48,14 +45,19 @@ from az.outerworld_engine.models.texplode6_model import TEXPLODE6_MODEL
 from az.outdoor.models.buildings import (
     DOORWAY, LARGE_BUILDING, SKYSCRAPER, SMALL_BUILDING, WAREHOUSE,
 )
-from az.outdoor.models.projectiles import (
-    SHELL_MODEL, SHELL_SCALE, TRACER_MODEL, TRACER_SCALE,
-)
 
-from az.common.weapon import (
-    BallisticFireControl, HeatFireControl, Loadout, ProjectileSpec, Weapon,
+# weapon factory + builders live in outdoor.weapons now (shared by the player
+# loadout here and the enemy vehicle loadouts in outdoor.vehicles, no cycle).
+# ENEMY_SHELL_DAMAGE and _enemy_loadout are re-exported for the increment-3
+# tests and any ad-hoc caller that imported them from this module.
+from az.outdoor.weapons import (
+    make_player_loadout,
+    make_enemy_shell_loadout as _enemy_loadout,
+    ENEMY_SHELL_DAMAGE,
 )
+from az.outdoor.director import Director
 from az.shell.mode import InputState, Transition
+
 
 # --- constants (ported verbatim from bz/game.py) ---------------------------
 
@@ -81,50 +83,20 @@ PLAYER_RADIUS = 6.0
 TICK_DT = 0.016                  # 16 ms — the sim's native fixed timestep
 WORLD_HALF_SIZE = 1000.0
 
-
-BULLET_SPEED = 2.0               # units / tick
-BULLET_RANGE = 1000.0
-BULLET_RADIUS = 1.0
-BULLET_MODEL_SCALE = SHELL_SCALE  # shell authored at world size -> 1.0
-BULLET_SPAWN_OFFSET = 12.0
-BULLET_Y = 4.5
-
+# Default score for a bare engine tank. Per-vehicle scores live on the
+# VehicleDef now (Sedan 1000, Pickup 2500, Flatbed 4000); this stays as the
+# Tank.score_value default and is what the increment-3 tests assert against.
 TANK_SCORE = 1000
 
-# --- damage model (M1 increment 3) -----------------------------------------
-# One unified economy: every damage source mutates one pool. The player pool is
-# PlayerState (max 100). These are STARTING POINTS to tune by feel in the
-# window, derived from the concept-sheet archetypes — not defaults handed down.
-#
-#   Player weapons (vs enemy HP):
-#     shell 60  → a Sedan (hp 40) one-shots, a Flatbed (hp 80) takes two,
-#                 a Pickup (hp 120) takes two and a chip.
-#     pulse 12  → ~4 hits on a Sedan, a long heat-limited burn on a Pickup
-#                 (making pulse the *wrong* tool for the bruiser — the point).
-#   Enemy weapon (vs the player's pool of 100):
-#     shell 25  → ~4 clean hits spend a life. pulse-chip enemies come with the
-#                 three-vehicle roster in increment 4.
-#   Generic roster HP (this increment, before the per-vehicle defs land):
-#     the two TANK_MODEL autos get ENEMY_TANK_HP so the chip-down is visible;
-#     increment 4 replaces this with the Sedan/Pickup/Flatbed hp values.
-SHELL_DAMAGE = 60.0
-PULSE_DAMAGE = 12.0
-ENEMY_SHELL_DAMAGE = 25.0
-ENEMY_TANK_HP = 80.0
+# Projectile tuning, the damage economy, and all weapon builders now live in
+# outdoor.weapons (imported above). ENEMY_SHELL_DAMAGE is re-exported there →
+# here for the increment-3 tests.
 
-# The enemy shell emerges from the front of the ~27u-radius tank hull, so its
-# spawn offset is larger than the player's (the player is a first-person eye,
-# not a 48u body). Speed/range/look mirror the player shell.
-ENEMY_SHELL_SPAWN_OFFSET = 34.0
-
-# --- pulse rifle (rapid-fire weapon, M1 inc 2) -----------------------------
-# Faster, lighter, shorter-reaching round than the shell — a tracer streak the
-# heat-gated rifle sprays. Speed/range in per-tick units like everything else.
-TRACER_SPEED = 5.0               # units / tick (300 u/sec — 2.5x the shell)
-TRACER_RANGE = 700.0
-TRACER_RADIUS = 0.8
-TRACER_SPAWN_OFFSET = 12.0
-TRACER_Y = 4.5
+# Interim two-weapon enemy select (the Flatbed): fire the pulse when the player
+# is within this range, the shell beyond it. A placeholder for the real
+# weapon-selection AI (vision §7); single-weapon enemies (Sedan, Pickup) never
+# reach it.
+FLATBED_PULSE_RANGE = 260.0
 
 FOV_DEG, NEAR, FAR = 75.0, 0.5, 6000.0
 
@@ -157,99 +129,6 @@ def _city_blocks() -> list[tuple[dict, float, float, float]]:
         (WAREHOUSE, -430.0, 200.0, 0.5),
         (WAREHOUSE, 360.0, 240.0, -0.6),
     ]
-
-
-def _bz_bullet_factory(spec: ProjectileSpec, x: float, z: float, y: float,
-                       vx: float, vz: float, heading: float, owner: str
-                       ) -> Bullet:
-    """Outdoor world's ProjectileFactory: a neutral spec + resolved spawn state
-    -> a real engine ``Bullet``. The seam that lets the shared Weapon stay free
-    of any engine import while still firing genuine BZ rounds."""
-    return Bullet(
-        model=spec.model, x=x, z=z, y=y, vx=vx, vz=vz,
-        range_remaining=spec.max_range, heading=heading,
-        scale=spec.scale, bounding_radius=spec.radius, owner=owner,
-        damage=spec.damage,
-    )
-
-
-def _shell_weapon() -> Weapon:
-    """The ballistic shell — the relocated _fire/_can_fire behavior, now a
-    Weapon. Same shell model, same per-tick speed/range/radius/offset, and the
-    canonical one-on-screen gate, just expressed as spec + control."""
-    return Weapon(
-        name="shell",
-        spec=ProjectileSpec(
-            model=SHELL_MODEL,
-            speed=BULLET_SPEED,
-            max_range=BULLET_RANGE,
-            scale=BULLET_MODEL_SCALE,
-            radius=BULLET_RADIUS,
-            spawn_offset=BULLET_SPAWN_OFFSET,
-            fly_height=BULLET_Y,
-            damage=SHELL_DAMAGE,
-        ),
-        control=BallisticFireControl(),
-        make_projectile=_bz_bullet_factory,
-    )
-
-
-def _pulse_weapon() -> Weapon:
-    """The pulse rifle — a heat-gated rapid-fire tracer weapon (the Blade
-    Runner side of the look). Fires fast, light rounds until it overheats, then
-    locks out until it cools. The heat numbers are feel knobs, set here:
-    12 rounds/sec, ~2.8 s of held fire to overheat, ~1.8 s lockout to re-engage.
-    """
-    return Weapon(
-        name="pulse",
-        spec=ProjectileSpec(
-            model=TRACER_MODEL,
-            speed=TRACER_SPEED,
-            max_range=TRACER_RANGE,
-            scale=TRACER_SCALE,
-            radius=TRACER_RADIUS,
-            spawn_offset=TRACER_SPAWN_OFFSET,
-            fly_height=TRACER_Y,
-            damage=PULSE_DAMAGE,
-        ),
-        control=HeatFireControl(
-            cadence_ticks=5,        # 12 rounds/sec @ 60 Hz
-            heat_per_shot=0.06,     # ~33 sustained rounds (~2.8 s) to overheat
-            cool_per_tick=0.006,    # ~2.8 s for a full cool from max
-            reengage=0.35,          # ~1.8 s lockout after an overheat
-        ),
-        make_projectile=_bz_bullet_factory,
-    )
-
-
-def _enemy_shell_weapon() -> Weapon:
-    """The enemy auto's gun — the SAME Weapon abstraction the player carries,
-    just with an enemy-tuned spec and fired owner='enemy'. The ballistic gate
-    gives each enemy the one-shell-on-screen rule the AI already assumes
-    (``enemy_bullet_in_flight``), and the round emerges from the front of the
-    tank hull. The three-vehicle roster (increment 4) swaps the spec/control
-    per chassis — Sedan a heat pulse, Pickup this shell, Flatbed both."""
-    return Weapon(
-        name="enemy-shell",
-        spec=ProjectileSpec(
-            model=SHELL_MODEL,
-            speed=BULLET_SPEED,
-            max_range=BULLET_RANGE,
-            scale=BULLET_MODEL_SCALE,
-            radius=BULLET_RADIUS,
-            spawn_offset=ENEMY_SHELL_SPAWN_OFFSET,
-            fly_height=BULLET_Y,
-            damage=ENEMY_SHELL_DAMAGE,
-        ),
-        control=BallisticFireControl(),
-        make_projectile=_bz_bullet_factory,
-    )
-
-
-def _enemy_loadout() -> Loadout:
-    """One enemy auto's weapons — a single ballistic shell for this increment.
-    Each tank gets its own Loadout instance (own fire-control state)."""
-    return Loadout([_enemy_shell_weapon()])
 
 
 # fragment palette for the kill burst / hit spit
@@ -291,14 +170,18 @@ class OutdoorWorld:
         self._accum = 0.0
         self._fx_rng = random.Random(20240613)   # fragment burst/spit jitter
 
+        # the spawn director (M1 increment 4). It owns the enemy roster now —
+        # which vehicles, how many — keyed off PlayerState.tier. The field is
+        # filled on_enter (it needs the tier from state), not here.
+        self.director = Director(seed=20240613)
+
         self._populate_city()      # buildings + skyscraper + lobby trigger
         self._populate_scene()     # terrain debris, kept clear of footprints
-        self._populate_tanks()
 
         # the player's weapons (M1 inc 2). Slot 0 ballistic shell (one on
         # screen at a time), slot 1 the heat-gated pulse rifle. Cycle with the
         # weapon-cycle input (bound to Tab in the shell).
-        self.loadout = Loadout([_shell_weapon(), _pulse_weapon()])
+        self.loadout = make_player_loadout()
 
     # --- scene setup -----------------------------------------------------
 
@@ -346,25 +229,38 @@ class OutdoorWorld:
         place(CUBE_MODEL, 5)
         place(PLATFORM_MODEL, 3)
 
-    def _populate_tanks(self) -> None:
-        # Two enemy autos forward of spawn. They roam (AI ticks), can be chipped
-        # down (HP) and killed for score, and now FIRE BACK — each carries the
-        # same Weapon/Loadout the player does, fired owner='enemy'. Generic
-        # TANK_MODEL hull + ENEMY_TANK_HP for this increment; the per-chassis
-        # Sedan/Pickup/Flatbed defs replace these in increment 4.
-        self.battlefield.add_tank(Tank(model=TANK_MODEL, x=-150.0, z=-350.0,
-                                       ai_seed=1, max_hp=ENEMY_TANK_HP,
-                                       hp=ENEMY_TANK_HP,
-                                       loadout=_enemy_loadout()))
-        self.battlefield.add_tank(Tank(model=TANK_MODEL, x=220.0, z=-300.0,
-                                       ai_seed=2, max_hp=ENEMY_TANK_HP,
-                                       hp=ENEMY_TANK_HP,
-                                       loadout=_enemy_loadout()))
+    def _current_tier(self, state) -> int:
+        """The escalation tier the director spawns against. Reads
+        ``PlayerState.tier`` (bumped on return-from-dive — the Milestone-3
+        ratchet). An ``AWF_TIER`` env var overrides it for in-seat / headless
+        testing of the deep curve before there are enough buildings to climb
+        the ledger naturally (vision §7's open 'what counts as a tick')."""
+        import os
+        forced = os.environ.get("AWF_TIER")
+        base = getattr(state, "tier", 0)
+        if forced is not None:
+            try:
+                return max(base, int(forced))
+            except ValueError:
+                pass
+        return base
 
     # --- World protocol --------------------------------------------------
 
     def on_enter(self, state, payload: dict[str, Any]) -> None:
         self.camera.x, self.camera.z, self.camera.heading = 0.0, 600.0, 0.0
+
+        # Escalation ratchet (vision §6: the single place "return → reinforce →
+        # harder" lives). The real Milestone-3 form bumps tier and injects a
+        # harder reinforcement on each dive-return; for now tier tracks dives
+        # cleared (a progression-derived placeholder, not a clock), and the
+        # director fills the persistent field back up to the tier's target —
+        # the war kept coming while you were inside. AWF_TIER can force a tier
+        # for testing the deep curve (see _current_tier).
+        if getattr(state, "tier", 0) < len(state.cleared):
+            state.tier = len(state.cleared)
+        self.director.fill(self.battlefield, self._current_tier(state),
+                           self.camera.x, self.camera.z)
 
     def on_exit(self, state) -> None:
         pass
@@ -450,6 +346,12 @@ class OutdoorWorld:
         # its fire-control each frame so cooldowns/heat advance even when idle.
         for t in self.battlefield.tanks:
             if t.loadout is not None:
+                # Interim two-weapon select (the Flatbed): pulse up close, shell
+                # at range. A placeholder for the real weapon-selection AI
+                # (vision §7); single-weapon enemies have nothing to choose.
+                if len(t.loadout.weapons) > 1:
+                    dist = math.hypot(cam.x - t.x, cam.z - t.z)
+                    t.loadout.select(1 if dist <= FLATBED_PULSE_RANGE else 0)
                 if t.ai_wants_fire:
                     t.loadout.active.try_fire(True, t, self.battlefield,
                                               owner="enemy")
@@ -462,13 +364,22 @@ class OutdoorWorld:
             player_x=cam.x, player_z=cam.z, player_radius=PLAYER_RADIUS)
 
         if killed:
-            state.add_score(len(killed) * TANK_SCORE)
+            # score is per-vehicle now (a Flatbed is worth more than a Sedan)
+            state.add_score(sum(t.score_value for t in killed))
             for t in killed:
                 _spawn_burst(self.battlefield, t.x, t.z, 9, self._fx_rng)
         for t in damaged:
             # non-lethal hit: a small spit of shards reads the chip even before
             # the damage tint (which draw_tank pulls from hp_fraction).
             _spawn_burst(self.battlefield, t.x, t.z, 2, self._fx_rng)
+
+        # within-tier persistence (M1 increment 4): the director refills the
+        # field back toward the tier's population target on a cooldown — losses
+        # are felt, then the war answers. This sustains; it does NOT escalate
+        # (that's the tier bump on return-from-dive). Runs after the kill pass so
+        # this tick's losses are reflected.
+        self.director.update(self.battlefield, self._current_tier(state),
+                             cam.x, cam.z)
 
         # player damage routes through the shell-owned pool — the one place a
         # hit *means* something (grace, lives, game over). take_damage no-ops

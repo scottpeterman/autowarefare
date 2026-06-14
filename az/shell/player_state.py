@@ -45,6 +45,14 @@ class PlayerState:
     # cleared building / district identifiers — the cross-seam progress flags
     cleared: set[str] = field(default_factory=set)
 
+    # escalation ledger (vision §6). The spawn director reads this to choose
+    # which vehicles spawn and how many. It crosses the seam like ``cleared``
+    # does — it's progression, not per-world state — and the Milestone-3
+    # return-from-dive ratchet (OutdoorWorld.on_enter) is the single place it
+    # bumps. 0 at the start of a run. NOT a wall-clock: difficulty is the
+    # player's search behavior, so only diving moves it.
+    tier: int = 0
+
     # transient per-tick feedback
     invuln_ticks: int = 0
     damage_flash_ticks: int = 0

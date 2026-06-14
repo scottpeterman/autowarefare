@@ -89,6 +89,24 @@ class Tank:
     # runtime import of common.weapon.
     loadout: "Loadout | None" = None
 
+    # Drive knobs (M1 increment 4). The chassis's handling, read by tank_ai
+    # instead of module globals so a Sedan can be twitchy and a Pickup
+    # ponderous. Defaults reproduce the pre-increment-4 single-tank feel
+    # exactly (the old TANK_CHASE_SPEED / TANK_TURN_SPEED_DEG / ENGAGE_DISTANCE),
+    # so an unspecified Tank drives as before; the VehicleDef spawner supplies
+    # the real per-chassis values. Patrol and evade speeds, the evade turn rate,
+    # and the disengage range are all fixed fractions of these (the ratio
+    # constants in tank_ai), so a chassis is consistently fast or slow across
+    # every movement state rather than needing a knob per state.
+    move_speed: float = 0.35        # u/tick — the chase / top speed
+    turn_speed_deg: float = 0.65    # deg/tick
+    engage_distance: float = 600.0  # world units; distance to commit to chase
+
+    # Score awarded when this tank dies (M1 increment 4 — score is per-vehicle:
+    # a Flatbed is worth more than a Sedan). Default 1000 matches the historical
+    # flat TANK_SCORE, so a bare engine tank scores as it always did.
+    score_value: int = 1000
+
     # AI state — slice 1 of the enemytank.js port lands the FSM in
     # bz/battlefield_engine/tank_ai.py. Reserved values per JS source
     # (enemytank.js:283-322): 'idle', 'patrol', 'patrolrotate',
