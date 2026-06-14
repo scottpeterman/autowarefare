@@ -13,6 +13,10 @@ renders are now **stacks of procedurally-generated floors** you climb.
 
 ---
 
+# But First! 
+I didn't write most of this. I architected it and evaluated every line — and the only reason that produces something coherent instead of garbage is the thirty years of reading code that lets me tell the difference
+
+
 ## What it is (the frame)
 
 Auto Warfare is a survival game wearing an arcade-combat skin. You drive an
