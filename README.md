@@ -11,6 +11,9 @@ the *how*. As of this milestone, the architecture is no longer a bet — a secon
 independent engine has been integrated into the shell, and the buildings it
 renders are now **stacks of procedurally-generated floors** you climb.
 
+###
+"Supervised Software Synthesis" — software produced by authoring the architecture and specification, directing a generative model to synthesize the implementation, and evaluating every line against the author's own engineering judgment. The model writes; the engineer is accountable. It is distinguished from "vibe coding" by exactly that evaluation function: it requires the literacy to tell correct from plausible, and it fails without it. -- source Claude Opus 4.8
+
 ---
 
 # But First! 
