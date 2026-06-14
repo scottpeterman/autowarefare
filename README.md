@@ -15,6 +15,7 @@ renders are now **stacks of procedurally-generated floors** you climb.
 
 # But First! 
 I didn't write most of this. I architected it and evaluated every line — and the only reason that produces something coherent instead of garbage is the thirty years of reading code that lets me tell the difference
+But it took many hours none-the-less... lets call it "Supervised Software Synthesis""
 
 
 ## What it is (the frame)
