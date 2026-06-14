@@ -92,8 +92,14 @@ def test_b_enemy_fires_through_shared_weapon() -> None:
     assert abs(b.damage - ENEMY_SHELL_DAMAGE) < 1e-6, "round carries spec damage"
     assert b.z < tank.z, "round spawns ahead of the hull along forward (-Z)"
 
-    # the ballistic gate is per-owner: no second enemy round while one is live
-    assert not tank.loadout.active.can_fire(ow.battlefield, "enemy")
+    # the ballistic gate is now per-SHOOTER (Session 7): this tank can't fire a
+    # second round while its own is live (cap 1)...
+    assert not tank.loadout.active.can_fire(ow.battlefield, "enemy", tank)
+    # ...but a different tank still can — the six-enemy field no longer shares a
+    # single live round the way the old per-owner gate forced.
+    other = Tank(model=TANK_MODEL, x=80.0, z=-200.0, heading=0.0,
+                 loadout=_enemy_loadout())
+    assert other.loadout.active.can_fire(ow.battlefield, "enemy", other)
 
 
 def test_c_enemy_round_damages_the_shared_pool() -> None:

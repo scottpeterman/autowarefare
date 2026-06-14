@@ -20,7 +20,9 @@ Physical keys are mapped to semantic InputState here so worlds never see Qt.
 
 from __future__ import annotations
 
+import os
 import time
+from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPainter, QSurfaceFormat
@@ -46,6 +48,15 @@ _FIRE_KEYS = {Qt.Key.Key_Space, Qt.Key.Key_F, Qt.Key.Key_Control}  # held: fire
 # edge: cycle weapon. Q stays bound to quit, so the cycle key is Tab; change
 # this set to rebind (e.g. swap quit off Q and add Qt.Key.Key_Q here).
 _CYCLE_KEYS = {Qt.Key.Key_Tab}
+# edge: take the stairs up / down (indoor only). Dedicated keys so signalling a
+# direction never also walks the player off the single stairwell cell the way a
+# movement key (W/S) would. Free of every other binding below.
+_STAIR_UP_KEYS = {Qt.Key.Key_U}
+_STAIR_DOWN_KEYS = {Qt.Key.Key_I}
+# edge: grab a screenshot of the exact GL backbuffer (HUD included). 'S' is the
+# reverse key, so screenshots live on P (easy reach) and F12 (muscle memory).
+# Saved to $AWF_SHOT_DIR (default ./screenshots) as a millisecond-stamped PNG.
+_SHOT_KEYS = {Qt.Key.Key_P, Qt.Key.Key_F12}
 
 
 class ShellApp(QOpenGLWidget):
@@ -109,6 +120,8 @@ class ShellApp(QOpenGLWidget):
             action=any(k in _ACTION_KEYS for k in edge),   # edge-triggered
             fire=any(k in _FIRE_KEYS for k in held),        # held (gated downstream)
             cycle=any(k in _CYCLE_KEYS for k in edge),      # edge-triggered
+            stair_up=any(k in _STAIR_UP_KEYS for k in edge),     # edge
+            stair_down=any(k in _STAIR_DOWN_KEYS for k in edge), # edge
         )
 
     # --- input -----------------------------------------------------------
@@ -119,6 +132,9 @@ class ShellApp(QOpenGLWidget):
         key = event.key()
         if key in (Qt.Key.Key_Q, Qt.Key.Key_Escape):
             self.window().close()
+            return
+        if key in _SHOT_KEYS:
+            self._save_screenshot()
             return
         self._held.add(key)
         self._edge.add(key)   # also an edge event this frame
@@ -137,6 +153,33 @@ class ShellApp(QOpenGLWidget):
         self._held.clear()
         self._edge.clear()
         super().focusOutEvent(event)
+
+    # --- screenshot ------------------------------------------------------
+
+    def _save_screenshot(self) -> None:
+        """Grab the exact GL backbuffer (HUD included) to a timestamped PNG.
+
+        ``grabFramebuffer`` re-renders through ``paintGL`` into an offscreen FBO
+        and returns it, so the capture is the precise backbuffer — no compositor
+        scaling, no capture-source guessing, and the QPainter HUD pass is part of
+        paintGL so it's in the shot too. The millisecond stamp lets rapid grabs
+        during motion land in distinct files. Console feedback (not a HUD flash)
+        keeps it out of the captured frame and matches the viewer's style.
+        """
+        try:
+            img = self.grabFramebuffer()
+        except Exception as exc:  # pragma: no cover - needs a live GL context
+            print(f"[screenshot] FAILED to grab framebuffer: "
+                  f"{type(exc).__name__}: {exc}")
+            return
+        shot_dir = os.environ.get("AWF_SHOT_DIR", "screenshots")
+        os.makedirs(shot_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]   # ms precision
+        path = os.path.join(shot_dir, f"aw_{stamp}.png")
+        if img.save(path):
+            print(f"[screenshot] {path}  ({img.width()}x{img.height()})")
+        else:
+            print(f"[screenshot] FAILED to write {path}")
 
     # --- GL --------------------------------------------------------------
 

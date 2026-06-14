@@ -35,6 +35,11 @@ from .level import (
     save_test_levels,
 )
 
+from .generate import (
+    generate_dungeon,
+    reachable_cells,
+)
+
 __version__ = "0.4.0"
 __all__ = [
     "DungeonMap",
@@ -52,4 +57,6 @@ __all__ = [
     "parse_level",
     "create_test_levels",
     "save_test_levels",
+    "generate_dungeon",
+    "reachable_cells",
 ]

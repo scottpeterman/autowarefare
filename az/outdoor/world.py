@@ -104,7 +104,9 @@ FOV_DEG, NEAR, FAR = 75.0, 0.5, 6000.0
 # building sizes are pure cover; only this one has a lobby you can enter.
 TOWER_ID = "tower_a"
 SKYSCRAPER_POS = (0.0, -650.0)   # dead ahead of spawn — the landmark
+SKYSCRAPER_HW = 56.0             # half-width; matches the outdoor box
 SKYSCRAPER_HD = 56.0             # half-depth; front (+Z) face is at z + HD
+TOWER_SEED = 0xA17A              # stable per building -> repeatable interior
 ENTER_RANGE = 90.0
 
 # cyberblue phosphor (Auto Warfare identity; BZ's own default is green)
@@ -393,7 +395,12 @@ class OutdoorWorld:
         self.battlefield.step_fragments()
 
         if inp.action and self._near_lobby():
-            return Transition("indoor", {"building": TOWER_ID})
+            return Transition("indoor", {
+                "building":  TOWER_ID,
+                "archetype": "skyscraper",
+                "footprint": (SKYSCRAPER_HW, SKYSCRAPER_HD),
+                "seed":      TOWER_SEED,
+            })
         return None
 
     # --- firing: the BZ projectile factory the player's weapons fire through -

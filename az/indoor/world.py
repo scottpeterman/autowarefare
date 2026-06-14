@@ -1,23 +1,31 @@
 """
-indoor/world.py — the real Castle of Bane interior, hosted as a shell guest.
+indoor/world.py — the Castle-of-Bane interior, hosted as a shell guest, now a
+*stack of floors* (session 8, Question 1).
 
-Milestone 2.0 (the riskiest-assumption test, cashed in): the scratch room is
-gone. This world now drives the vendored Bane engine (``az.innerworld_engine``:
-DungeonMap + BSPTree + Level) and the de-windowed wall renderer
-(``indoor/renderer.py``). It loads a real grid dungeon, walks it first-person
-with grid collision against real walls and closed doors, and hands back to the
-outer world through the portal — proving the guest renderer round-trips inside
-the shell's loop without owning a window, a timer, or the GL context.
+Milestone 2.0 made the scratch room a real single-floor grid dungeon. This step
+(the floor stack) grows that one dungeon into ``self.floors`` — a building is a
+stack, a floor is a ``DungeonMap``, and **moving between floors is internal to
+this world**, never a portal transition. The portal still crosses exactly one
+seam (outdoor <-> indoor) carrying only ``PlayerState``; a staircase swaps the
+active ``(dungeon, bsp_tree)`` pair *within* this world and repositions the
+camera. The shell never sees it.
 
-NOT yet here (by M2.0 design): combat, enemies, projectiles, the staff weapon,
-and the interior HUD/minimap. Those are M2.2 (combat on shell PlayerState) and
-M2.3 (the first gunman). See README_Innerworld_Design.md.
+The stair mechanic is **prompt-gated** on a single shared stairwell column:
+stand on the column, press E (action), and push the way you want to go —
+forward ascends, back descends. The phosphor prompt is the question; the held
+direction is the answer. On an endpoint floor (ground or roof) there is only one
+way, so E alone takes it. This deletes the auto-on-contact debounce wholesale:
+walking across the column does nothing, and *arriving* on the destination column
+just shows the prompt again instead of bouncing you back.
 
-Coordinate space is Bane-native and stays sealed in this world and its
-renderer: **-Y is up** (eye at y=-15, floor y=0, ceiling y≈-60), human scale
-(CELL_SIZE=50). heading is degrees about +Y (Bane convention); forward is
-(sin h, -cos h), the same forward convention as the rest of the game. Only
-PlayerState crosses the portal — never coordinates, never the vertical axis.
+``depth`` (the M3 outcome payload's richest field) falls straight out of this:
+it is ``self.max_floor`` — the highest floor index reached this dive. The
+interior doesn't *report* difficulty; the floor you climb to *is* it.
+
+Coordinate space is Bane-native and stays sealed here and in the renderer:
+**-Y is up** (eye at y=-15, floor y=0), human scale (CELL_SIZE=50). heading is
+degrees about +Y; forward is (sin h, -cos h). Only PlayerState crosses the
+portal — never coordinates, never the vertical axis.
 """
 
 from __future__ import annotations
@@ -25,10 +33,9 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from az.innerworld_engine import (
-    CELL_SIZE, CellType, build_bsp_from_dungeon, create_test_dungeon,
-)
+from az.innerworld_engine import CELL_SIZE, CellType, create_test_dungeon
 from az.indoor import renderer
+from az.indoor.floor import FloorRuntime
 from az.shell.mode import InputState, Transition
 
 # --- feel knobs (Bane-native per-tick constants; do NOT rescale to seconds) --
@@ -38,20 +45,49 @@ INDOOR_TURN_SPEED_DEG = 2.0      # degrees / tick       (Bane _handle_input turn
 BODY_RADIUS = 12.0               # collision radius     (Bane collision_radius)
 EYE_Y = -15.0                    # eye height in -Y-up space (Bane cam_y)
 
-# Entry and exit cells in the test dungeon (both verified walkable):
-#   start  = (9, 9)   centre room
-#   exit   = (15, 9)  far east room — walk the east corridor to leave
+# Default-stack cells (the M2.0 test dungeon, verified walkable):
+#   start = (9, 9)   centre room — spawn
+#   exit  = (15, 9)  far east room — the door you came in by
+#   stair = (11, 8)  centre room — the shared stairwell column
+# These are create_test_dungeon artifacts; a generated stack (step 3) names its
+# own from carved geometry. Kept module-level because test_indoor_m20 imports
+# START_CELL / EXIT_CELL to assert the bare-payload fallback.
 START_CELL = (9, 9)
 EXIT_CELL = (15, 9)
-EXIT_HALF = 22.0                 # action-to-leave zone half-extent (cell ≈ 50)
+STAIR_CELL = (11, 8)
+EXIT_HALF = 22.0                 # action-to-leave zone half-extent (cell ~= 50)
+
+
+def _build_default_floors() -> list[FloorRuntime]:
+    """The bare-payload fallback (``{"building": id}`` with no archetype): a
+    two-floor stack on the M2.0 test dungeon. Floor 0 keeps the exact geometry
+    M2.0 pinned (start/exit/solid-corners unchanged) so test_indoor_m20 stays
+    green; both floors share the stairwell column at STAIR_CELL so the climb is
+    aligned by construction. Floor 1 exists purely to give the stack a second
+    storey to climb to — its own exit is None (you only leave from the ground)."""
+    d0 = create_test_dungeon()
+    d0.set_cell(*STAIR_CELL, CellType.STAIRS_UP)
+    d0.generate_walls()
+    f0 = FloorRuntime(dungeon=d0, stair_cell=STAIR_CELL,
+                      start_cell=START_CELL, exit_cell=EXIT_CELL)
+
+    d1 = create_test_dungeon()
+    d1.set_cell(*STAIR_CELL, CellType.STAIRS_DOWN)
+    d1.generate_walls()
+    f1 = FloorRuntime(dungeon=d1, stair_cell=STAIR_CELL, start_cell=STAIR_CELL)
+
+    return [f0, f1]
 
 
 class IndoorWorld:
     name = "indoor"
 
     def __init__(self) -> None:
-        self.dungeon = None
-        self.bsp_tree = None
+        self.floors: list[FloorRuntime] = []
+        self.floor_index = 0
+        self.max_floor = 0          # -> the M3 payload's ``depth``
+        self.dungeon = None         # view onto floors[floor_index].dungeon
+        self.bsp_tree = None        # view onto floors[floor_index].bsp()
         self.cam_x = 0.0
         self.cam_z = 0.0
         self.cam_angle_deg = 0.0
@@ -59,19 +95,37 @@ class IndoorWorld:
         self.exit_z = 0.0
         self._building = "tower_a"
         self._accum = 0.0
+        self._floor_changed = False
 
     # --- World protocol --------------------------------------------------
 
     def on_enter(self, state, payload: dict[str, Any]) -> None:
-        """Spin up at this world's own entry. No pose persists across the seam
-        (POC §6): the interior always starts at its door."""
-        self._building = payload.get("building", "tower_a")
-        self.dungeon = create_test_dungeon()
-        self.bsp_tree = build_bsp_from_dungeon(self.dungeon)
+        """Spin up at floor 0's start cell. No pose persists across the seam
+        (POC §6): the interior always starts at its door.
 
-        self.cam_x, self.cam_z = self.dungeon.grid_to_world(*START_CELL)
+        New behavior is additive and gated on ``archetype`` being present in the
+        payload. A bare ``{"building": id}`` payload (what test_floor_stack and
+        test_indoor_m20 send) takes the default two-floor stack — the step-2
+        fallback — untouched. The archetype branch (step 3, ProceduralSource)
+        slots in here."""
+        self._building = payload.get("building", "tower_a")
+
+        archetype = payload.get("archetype")
+        if archetype is not None:
+            from az.indoor.floor_source import ProceduralSource
+            src = ProceduralSource()
+            footprint = payload.get("footprint", (200.0, 200.0))
+            seed = payload.get("seed", 0)
+            n = src.floor_count(archetype, footprint, seed)
+            self.floors = [src.build_floor(archetype, footprint, seed, i)
+                           for i in range(n)]
+        else:
+            self.floors = _build_default_floors()
+
+        self.floor_index = 0
+        self.max_floor = 0
         self.cam_angle_deg = 0.0
-        self.exit_x, self.exit_z = self.dungeon.grid_to_world(*EXIT_CELL)
+        self._apply_floor(0, self.floors[0].start_cell)
         self._accum = 0.0
 
     def on_exit(self, state) -> None:
@@ -83,11 +137,15 @@ class IndoorWorld:
         self._accum += dt
         steps = 0
         transition: Transition | None = None
+        self._floor_changed = False
         while self._accum >= TICK_DT and steps < 5:
             transition = self._sim_tick(inp, state)
             self._accum -= TICK_DT
             steps += 1
-            if transition is not None:
+            # One swap (or one handoff) per frame: a floor change zeroes the
+            # accumulator and breaks, so the same edge-held action can't act
+            # again on the cell we just arrived on. The prompt re-asks next frame.
+            if transition is not None or self._floor_changed:
                 self._accum = 0.0
                 break
         return transition
@@ -95,6 +153,43 @@ class IndoorWorld:
     @property
     def spatial(self):
         return self
+
+    # --- floor stack -----------------------------------------------------
+
+    def _apply_floor(self, index: int, arrive_cell) -> None:
+        """Swap the active floor: point ``self.dungeon`` / ``self.bsp_tree`` at
+        floor ``index`` (lazy-building its BSP on first visit), drop the camera
+        on ``arrive_cell``, and advance ``max_floor`` (the depth counter). The
+        renderer and spatial query read ``self.dungeon`` / ``self.bsp_tree``
+        unchanged — this is the whole floor-swap, exactly the seam the plan
+        stands on."""
+        self.floor_index = index
+        fr = self.floors[index]
+        self.dungeon = fr.dungeon
+        self.bsp_tree = fr.bsp()
+        self.cam_x, self.cam_z = self.dungeon.grid_to_world(*arrive_cell)
+        if index > self.max_floor:
+            self.max_floor = index
+        if fr.exit_cell is not None:
+            self.exit_x, self.exit_z = self.dungeon.grid_to_world(*fr.exit_cell)
+
+    def _change_floor(self, new_index: int) -> None:
+        """Take the stairwell to ``new_index``, arriving at that floor's shared
+        column. Heading is preserved (you face the way you were facing); the
+        accumulator break in update() makes this one-swap-per-frame."""
+        arrive = self.floors[new_index].stair_cell
+        self._apply_floor(new_index, arrive)
+        self._floor_changed = True
+
+    def _can_ascend(self) -> bool:
+        return self.floor_index + 1 < len(self.floors)
+
+    def _can_descend(self) -> bool:
+        return self.floor_index - 1 >= 0
+
+    def _on_stair(self) -> bool:
+        gx, gz = self.dungeon.world_to_grid(self.cam_x, self.cam_z)
+        return (gx, gz) == self.floors[self.floor_index].stair_cell
 
     # --- one native sim tick (ported from Bane _handle_input) ------------
 
@@ -126,8 +221,23 @@ class IndoorWorld:
                 nx, nz = old_x, old_z
         self.cam_x, self.cam_z = nx, nz
 
-        # Exit: stand in the exit zone and tap action -> clear + hand back.
-        if inp.action and self._in_exit_zone():
+        # Stairwell: on the column, U takes you up, I takes you down (dedicated
+        # edge keys, mapped in the shell). Dedicated rather than E+direction
+        # because a movement key would walk you off the single stairwell cell
+        # before the swap could fire. Endpoints simply have nothing to do for
+        # the unavailable direction. A swap consumes the frame (the accumulator
+        # break in update()), so one press = one floor.
+        if self._on_stair():
+            if inp.stair_up and self._can_ascend():
+                self._change_floor(self.floor_index + 1)
+                return None
+            if inp.stair_down and self._can_descend():
+                self._change_floor(self.floor_index - 1)
+                return None
+
+        # Exit: gated to floor 0 (you leave the building only from the ground).
+        # Stand in the exit zone and tap action (E) -> clear + hand back.
+        if inp.action and self.floor_index == 0 and self._in_exit_zone():
             state.mark_cleared(self._building)
             return Transition("outdoor", {"from": self._building})
         return None
@@ -136,7 +246,7 @@ class IndoorWorld:
 
     def can_move_to(self, x: float, z: float, radius: float
                     ) -> tuple[bool, float, float]:
-        """Resolve a desired position against the grid. Returns
+        """Resolve a desired position against the active floor's grid. Returns
         (was_free, resolved_x, resolved_z). Player slide-along is handled in
         _sim_tick (origin-aware trial-revert, mirroring the outdoor world); this
         method answers the stateless 'can a body of this radius stand here?'
@@ -146,10 +256,8 @@ class IndoorWorld:
 
     def line_of_sight(self, ax: float, az: float,
                       bx: float, bz: float) -> bool:
-        """Grid-sampled LOS: walk the segment in half-cell steps and fail on the
-        first solid cell. Real Bane uses combat.has_line_of_sight (grid DDA);
-        this minimal version satisfies the contract until the combat port (M2.3)
-        brings the enemy that needs it."""
+        """Grid-sampled LOS on the active floor: walk the segment in half-cell
+        steps and fail on the first solid cell."""
         dx, dz = bx - ax, bz - az
         dist = math.hypot(dx, dz)
         if dist < 1e-6:
@@ -166,9 +274,9 @@ class IndoorWorld:
     # --- helpers ---------------------------------------------------------
 
     def _blocked(self, x: float, z: float, radius: float = BODY_RADIUS) -> bool:
-        """Grid collision: sample the body centre plus four cardinal offsets at
-        ``radius``; blocked if any sample is non-walkable or a closed door
-        (ported from Bane _handle_input's collision check)."""
+        """Grid collision against the active floor: sample the body centre plus
+        four cardinal offsets at ``radius``; blocked if any sample is
+        non-walkable or a closed door."""
         for dx, dz in ((0.0, 0.0), (radius, 0.0), (-radius, 0.0),
                        (0.0, radius), (0.0, -radius)):
             gx, gz = self.dungeon.world_to_grid(x + dx, z + dz)
@@ -182,17 +290,44 @@ class IndoorWorld:
         return (abs(self.cam_x - self.exit_x) <= EXIT_HALF and
                 abs(self.cam_z - self.exit_z) <= EXIT_HALF)
 
+    @property
+    def depth(self) -> int:
+        """Max floor index reached this dive — the M3 outcome payload's richest
+        field. 0 for an outbuilding you never climbed; it grows with the dive."""
+        return self.max_floor
+
     def status_text(self, state) -> str:
-        if self._in_exit_zone():
+        if self._on_stair():
+            up_ok, down_ok = self._can_ascend(), self._can_descend()
+            if up_ok and down_ok:
+                return "STAIRWELL — U: up   I: down"
+            if up_ok:
+                return "STAIRWELL — press U to climb"
+            if down_ok:
+                return "STAIRWELL — press I to descend"
+        if self.floor_index == 0 and self._in_exit_zone():
             return "EXIT — press E to leave the tower"
-        return "move: W/S  turn: A/D   reach the green exit (far east room)"
+        return (f"floor {self.floor_index}/{len(self.floors) - 1}   "
+                "move: W/S  turn: A/D")
 
     # --- draw ------------------------------------------------------------
 
     def draw(self, vp_w: int, vp_h: int) -> None:
+        fr = self.floors[self.floor_index]
+        # The exit marker only exists on the ground floor.
+        exit_world = ((self.exit_x, self.exit_z)
+                      if self.floor_index == 0 else None)
+        # The stairwell marker, with the directions this floor offers — so an
+        # endpoint shows one way and a mid-floor shows both.
+        stair_world = None
+        stair_dirs = (False, False)
+        if fr.stair_cell is not None:
+            stair_world = self.dungeon.grid_to_world(*fr.stair_cell)
+            stair_dirs = (self._can_ascend(), self._can_descend())
         renderer.draw_interior(
             dungeon=self.dungeon, bsp_tree=self.bsp_tree,
             cam_x=self.cam_x, cam_y=EYE_Y, cam_z=self.cam_z,
             cam_angle_deg=self.cam_angle_deg, vp_w=vp_w, vp_h=vp_h,
-            exit_world=(self.exit_x, self.exit_z), exit_half=EXIT_HALF,
+            exit_world=exit_world, exit_half=EXIT_HALF,
+            stair_world=stair_world, stair_dirs=stair_dirs,
         )

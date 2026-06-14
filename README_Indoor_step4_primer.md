@@ -41,27 +41,10 @@ different renderers as interchangeable *guests*, switching between them through
 a portal — neither engine owns a window, a timer, or the loop.
 
 **The outdoor world** — a Battlezone-derived vector engine (`outerworld_engine`).
-You drive an armored auto across a wide (~2000-unit) battlefield with horizon,
-terrain, and wireframe buildings; fire two switchable weapons (a ballistic shell
-and a heat-gated pulse rifle); and fight a **three-chassis enemy bestiary** for
-score, with the war already escalating as you search:
-
-- **Sedan / Pickup / Flatbed.** A fast-fragile pulse-MG swarm, a slow-tough
-  shell-cannon bruiser, and a medium both-weapons elite — each its own
-  wireframe, HP, handling, and loadout, driven by AI. Enemies fire back through
-  the *same* engine-neutral weapon abstraction the player uses, owner-tagged.
-- **A spawn director** turns one input — a `tier` that **bumps each time you
-  return from a building dive** (the Milestone-3 escalation ratchet, not a clock)
-  — into how many enemies hold the field and who they are. Population rises then
-  plateaus at a ceiling; the mix shifts (Sedans early, Pickups gate mid, Flatbeds
-  rare and late); and the field **refills within a tier**, so a cleared area
-  doesn't go quiet and farmable.
-- **One unified damage economy.** Projectile damage, enemy HP (chip → kill →
-  score), enemy return fire, and player damage all route through the shell's
-  `PlayerState` — grace frames, lives, and a game-over freeze — so a hit *means*
-  something in either world.
-
-Drive to the landmark skyscraper and press **E** to enter it.
+You drive a tank-scale auto across a ~2 km battlefield with horizon, terrain, and
+wireframe buildings; fire two weapons (a ballistic shell and a heat-gated pulse
+rifle, switchable); destroy enemy autos driven by AI for score; and drive to the
+landmark skyscraper to enter it.
 
 **The indoor world** — the *Castle of Bane* wireframe dungeon core
 (`innerworld_engine`: grid `DungeonMap`, BSP-ordered walls, the `.map` cell
@@ -182,10 +165,6 @@ az/
   common/           engine-neutral systems — weapons, spatial queries, motion, models
   hud/              the HUD compositor (reads PlayerState)
   outdoor/          the outdoor world wiring (adapts outerworld_engine to World)
-    world.py            OutdoorWorld — drive/fire loop, damage routing, the lobby portal
-    vehicles.py         the three enemy chassis as data (model + hp + handling + loadout)
-    director.py         the tier-driven spawn director (population, mix, refill)
-    weapons.py          player + enemy weapon/projectile factories
   outerworld_engine/  Battlezone-derived vector engine — tanks, AI, terrain, render
   indoor/           the indoor world wiring + de-windowed renderer
     world.py            IndoorWorld — the floor stack, stair swap, collision/LOS, exit
@@ -204,11 +183,8 @@ az/
 
 - **M0 — walking skeleton** ✅ drive outdoor, enter a placeholder interior,
   return; the one-shell loop and portal proven.
-- **M1 — combat abstraction** ✅ engine-neutral weapons/loadout (ballistic shell
-  + heat-gated pulse, switchable); a unified damage economy (enemy HP, enemy
-  return fire, player damage → lives → game-over); a three-chassis enemy bestiary
-  (Sedan / Pickup / Flatbed) driven by AI; and a tier-driven spawn director
-  (stepped population plateau, gated mix, within-tier refill).
+- **M1 — combat abstraction** ✅ engine-neutral weapons/loadout; ballistic shell
+  + heat-gated pulse; enemy tank AI and scoring outdoors.
 - **M2.0 — Bane integration** ✅ the real dungeon engine vendored and de-windowed
   as a guest; first-person movement, occluding wireframe render, portal
   round-trip. *Architecture proven.*
@@ -220,15 +196,12 @@ az/
 - **M2.2 — indoor combat** ⏳ grid line-of-sight enemies; move Bane's
   player-health into the shell's `PlayerState` (the one invasive thread); the
   first gunman. A parallel thread to the structure work above.
-- **M3 — the loop** ⏳ the search economy. The escalation *skeleton* already runs
-  — the spawn director plus a `tier` that bumps on return-from-dive — so "the war
-  is worse when you climb back out" is wired in placeholder form. Pending: the
-  hidden win-condition object, the richer reinforcement-on-return, and interiors
-  that yield hints — bridged by the **outcome payload** (`cleared` / `depth` /
-  `found` / `hint`) the exit `Transition` reports. `depth` is already produced;
-  wiring the rest and the plant/intel placement decorator is the next step, and
-  the handoff to the ratchet that turns interior results into battlefield
-  escalation.
+- **M3 — the loop** ⏳ the search economy: the hidden win-condition object,
+  reinforcement-on-return escalation, and interiors that yield hints. The bridge
+  is the **outcome payload** (`cleared` / `depth` / `found` / `hint`) the exit
+  `Transition` reports — `depth` is already produced; wiring the rest and the
+  plant/intel placement decorator is the next step, and the handoff to the
+  ratchet that turns interior results into battlefield escalation.
 
 ---
 

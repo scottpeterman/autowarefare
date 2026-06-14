@@ -93,10 +93,12 @@ class FireControl(Protocol):
     succeed right now?" without consuming anything.
     """
 
-    def update(self, trigger_held: bool, battlefield: Any, owner: str) -> bool:
+    def update(self, trigger_held: bool, battlefield: Any, owner: str,
+               shooter: Any = None) -> bool:
         ...
 
-    def can_fire(self, battlefield: Any, owner: str) -> bool:
+    def can_fire(self, battlefield: Any, owner: str,
+                 shooter: Any = None) -> bool:
         ...
 
     def tick(self) -> None:
@@ -108,18 +110,36 @@ class FireControl(Protocol):
 
 @dataclass
 class BallisticFireControl:
-    """The canonical Battlezone gate: one live round of your own on screen at a
-    time. The next round cannot fire until the previous one has hit something
-    or exhausted its range — the exact rule the arcade enforced and the reason
-    the crosshair blinks out while a shell is in flight. Stateless: the gate is
-    read entirely from the live ``battlefield.bullets``, so it needs no clock.
+    """The canonical Battlezone gate: one live round on screen at a time — but
+    per *shooter*, not per *owner*. The next round cannot fire until that
+    shooter's previous one has hit something or exhausted its range.
+
+    Why per-shooter (Session 7, vision §7): the player is a single shooter, so
+    ``cap = 1`` reproduces the arcade one-shell rule exactly. But every enemy
+    tank is its own shooter, so a six-tank field can have up to six rounds in
+    flight (one each) — the war reads as a war instead of the whole field
+    politely sharing one bullet. The per-shooter ``cap`` is what keeps that
+    fair: the fear §7 names is an unwinnable wall of bullets, and the answer is
+    per-shooter attribution *with* a per-shooter cap, not an ungated field.
+
+    Stateless: the gate is read entirely from the live ``battlefield.bullets``
+    (each tagged with its ``shooter``), so it needs no clock. When no shooter is
+    supplied (HUD crosshair reads, hand-built test rounds), it falls back to the
+    legacy per-owner gate, which for the single-shooter player is identical.
     """
 
-    def can_fire(self, battlefield: Any, owner: str) -> bool:
-        return not any(b.owner == owner for b in battlefield.bullets)
+    cap: int = 1   # max concurrent live rounds PER SHOOTER
 
-    def update(self, trigger_held: bool, battlefield: Any, owner: str) -> bool:
-        return trigger_held and self.can_fire(battlefield, owner)
+    def can_fire(self, battlefield: Any, owner: str,
+                 shooter: Any = None) -> bool:
+        if shooter is None:
+            return not any(b.owner == owner for b in battlefield.bullets)
+        live = sum(1 for b in battlefield.bullets if b.shooter is shooter)
+        return live < self.cap
+
+    def update(self, trigger_held: bool, battlefield: Any, owner: str,
+               shooter: Any = None) -> bool:
+        return trigger_held and self.can_fire(battlefield, owner, shooter)
 
     def tick(self) -> None:
         return  # stateless — the gate is read live from the battlefield
@@ -156,11 +176,13 @@ class HeatFireControl:
             return 0.0
         return max(0.0, min(1.0, self.heat / self.max_heat))
 
-    def can_fire(self, battlefield: Any, owner: str) -> bool:
+    def can_fire(self, battlefield: Any, owner: str,
+                 shooter: Any = None) -> bool:
         return (not self.overheated) and self.cooldown <= 0
 
-    def update(self, trigger_held: bool, battlefield: Any, owner: str) -> bool:
-        if not (trigger_held and self.can_fire(battlefield, owner)):
+    def update(self, trigger_held: bool, battlefield: Any, owner: str,
+               shooter: Any = None) -> bool:
+        if not (trigger_held and self.can_fire(battlefield, owner, shooter)):
             return False
         self.heat += self.heat_per_shot
         self.cooldown = self.cadence_ticks
@@ -195,12 +217,13 @@ class Weapon:
     control: FireControl
     make_projectile: ProjectileFactory
 
-    def can_fire(self, battlefield: Any, owner: str = "player") -> bool:
-        return self.control.can_fire(battlefield, owner)
+    def can_fire(self, battlefield: Any, owner: str = "player",
+                 shooter: Any = None) -> bool:
+        return self.control.can_fire(battlefield, owner, shooter)
 
     def try_fire(self, trigger_held: bool, shooter: Any, battlefield: Any,
                  owner: str = "player") -> bool:
-        if not self.control.update(trigger_held, battlefield, owner):
+        if not self.control.update(trigger_held, battlefield, owner, shooter):
             return False
         fx, fz = shooter.forward
         s = self.spec
@@ -214,6 +237,9 @@ class Weapon:
             shooter.heading,
             owner,
         )
+        # tag the round with the firing entity so the per-shooter gate can count
+        # it (distinct from owner; see BallisticFireControl / Bullet.shooter).
+        round_.shooter = shooter
         battlefield.add_bullet(round_)
         return True
 

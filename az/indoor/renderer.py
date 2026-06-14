@@ -42,6 +42,7 @@ WALL_RGB = (0.0, 0.75, 1.0)
 FILL_INTENSITY = 0.15
 GRID_RGB = (0.0, 0.22, 0.32)
 EXIT_RGB = (0.25, 1.0, 0.5)
+STAIR_RGB = (1.0, 0.7, 0.1)      # amber — distinct from exit-green and wall-blue
 
 FOV_DEG = 75.0
 NEAR, FAR = 1.0, 1000.0      # Bane's own near/far; interiors are bounded
@@ -50,7 +51,9 @@ NEAR, FAR = 1.0, 1000.0      # Bane's own near/far; interiors are bounded
 def draw_interior(*, dungeon, bsp_tree, cam_x: float, cam_y: float,
                   cam_z: float, cam_angle_deg: float, vp_w: int, vp_h: int,
                   exit_world: tuple[float, float] | None = None,
-                  exit_half: float = 25.0) -> None:
+                  exit_half: float = 25.0,
+                  stair_world: tuple[float, float] | None = None,
+                  stair_dirs: tuple[bool, bool] = (False, False)) -> None:
     """Render one indoor frame into the shell's already-current GL context.
 
     ``cam_angle_deg`` is degrees about +Y (Bane convention). ``cam_y`` is the
@@ -102,6 +105,10 @@ def draw_interior(*, dungeon, bsp_tree, cam_x: float, cam_y: float,
 
     if exit_world is not None:
         _draw_exit_marker(exit_world[0], exit_world[1], exit_half)
+
+    if stair_world is not None:
+        _draw_stair_marker(stair_world[0], stair_world[1],
+                           stair_dirs[0], stair_dirs[1])
 
     glLineWidth(1.0)
     # Leave the context QPainter-safe for the shell's HUD pass (the validated
@@ -173,3 +180,49 @@ def _draw_exit_marker(cx: float, cz: float, half: float) -> None:
     glVertex3f(cx + half, y, cz + half)
     glVertex3f(cx - half, y, cz + half)
     glEnd()
+
+
+def _square_loop(cx: float, cz: float, half: float, y: float) -> None:
+    glBegin(GL_LINE_LOOP)
+    glVertex3f(cx - half, y, cz - half)
+    glVertex3f(cx + half, y, cz - half)
+    glVertex3f(cx + half, y, cz + half)
+    glVertex3f(cx - half, y, cz + half)
+    glEnd()
+
+
+def _draw_stair_marker(cx: float, cz: float,
+                       up_ok: bool, down_ok: bool) -> None:
+    """An amber stairwell glyph on the column cell: a floor footprint, a centre
+    beacon rising toward the ceiling (so the stairwell is findable from across
+    the room), and stacked steps that *shrink upward* for an available climb and
+    *shrink downward* (below the floor) for an available descent. A mid-floor
+    shows both — an hourglass that reads 'stairs both ways'; an endpoint shows
+    only its one direction. -Y is up in this space, so 'up' rises toward the
+    ceiling exactly as it should.
+    """
+    from az.innerworld_engine import CELL_SIZE
+    half = CELL_SIZE / 2.0 - 4.0
+    glColor3f(*STAIR_RGB)
+    glLineWidth(2.0)
+
+    # floor footprint of the stairwell
+    _square_loop(cx, cz, half, -2.0)
+
+    # centre beacon — a vertical post visible over the floor clutter
+    glBegin(GL_LINES)
+    glVertex3f(cx, -2.0, cz)
+    glVertex3f(cx, -CELL_SIZE * 0.9, cz)
+    glEnd()
+
+    steps = 4
+    if up_ok:
+        for i in range(1, steps + 1):
+            t = i / steps
+            _square_loop(cx, cz, half * (1.0 - 0.55 * t),
+                         -2.0 - t * (CELL_SIZE * 0.45))
+    if down_ok:
+        for i in range(1, steps + 1):
+            t = i / steps
+            _square_loop(cx, cz, half * (1.0 - 0.55 * t),
+                         -2.0 + t * (CELL_SIZE * 0.30))

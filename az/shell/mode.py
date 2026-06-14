@@ -45,6 +45,8 @@ class InputState:
     action: bool = False      # edge: enter / exit / interact
     fire: bool = False        # held: weapon fire (rate gated by the world)
     cycle: bool = False       # edge: cycle to the next weapon in the loadout
+    stair_up: bool = False    # edge: take stairs up (indoor; U)
+    stair_down: bool = False  # edge: take stairs down (indoor; I)
 
 
 # A reusable no-input frame (e.g. when the window loses focus).

@@ -189,3 +189,69 @@ sits cleanly downstream of the queued work and does not jump ahead of it:
 
 When that milestone is the active work, it earns its own session primer — this
 doc is the brief that primer will be written from.
+---
+
+## 9. Settled since writing (what the build decided)
+
+This compass was written before §6's pieces were tangible. Per the header's own
+rule — it evolves "as the game is discovered," and updating it means recording
+what *reality decided*, not rephrasing what's still a guess — this section moves
+a handful of items from intent/open to settled. **§1–§8 stand unchanged**; only
+the few questions the build actually answered are recorded here. Where something
+is half-built, it says so. Where a tension is still genuinely open, it stays open
+(§7 was right that you can't answer it before the search exists).
+
+- **The interior is real, multi-floor, and procedurally generated — and the Bane
+  generator was *not* vendored.** §8 step 3 said "vendoring the Bane renderer."
+  What landed: the Bane *engine core* (the grid `DungeonMap`, BSP, and `.map`
+  cell vocabulary) was vendored and de-windowed, but the dungeon **generator** is
+  a **native, seeded rooms-and-corridors generator** written on the engine's own
+  carve primitives — a deliberate correction of an earlier "port the Bane
+  generator" plan. Buildings are now stacks of floors shaped by `archetype`
+  (floor count + density) and `footprint` (grid envelope), deterministic per
+  `seed`, and **solvable by construction**. Floors are linked by an internal
+  prompt-gated stairwell (U/I), never a portal transition. This is the *structure*
+  half of the §8/M3 producer, built ahead of the loop it feeds.
+
+- **`depth` is a real counter, not an abstraction.** §3's "skyscraper > outbuilding,
+  depth scales the ratchet delta" now falls straight out of the staircase: `depth`
+  is the max floor reached this dive, already produced and ready for the M3
+  payload to report.
+
+- **§6 "decouple escalation from building count" — done.** `PlayerState.tier`
+  exists and bumps on return-from-dive; the difficulty curve is no longer hostage
+  to how many interiors exist. Aspiration → fact.
+
+- **§6 "the one genuinely new subsystem — a spawn director" — built.** It is the
+  real thing §6 described: one input (`tier`) → population target + a gated,
+  shifting mix (Sedans early, Pickups gate mid, Flatbeds rare/late), plus
+  within-tier refill so a cleared area doesn't go quiet and farmable.
+
+- **§7 "escalation needs a ceiling or a pace" — the *plateau* answer shipped.**
+  Of §7's candidate answers, the build chose "escalation that plateaus": the
+  population target rises in steps and caps at a ceiling, so a deep field gets
+  nastier per enemy (the mix shifts) but not unbounded in number. This is
+  **partly** resolved — the plateau is in; the other half of the worry (a blind
+  search hardening into unwinnable) can't be closed until the search itself
+  exists, so it stays open below.
+
+- **§6 "enemies are the player's own vehicles minus input" — validated on the
+  enemy side, half-built.** The shared `VehicleDef` (model + hp + drive knobs +
+  loadout) is real, and the Sedan / Pickup / Flatbed enemy bestiary is built and
+  AI-driven. The *player* embodiment — the camera adopting a def, the player
+  choosing a chassis — is **not** built yet; the player still drives the
+  reference chassis directly. The idea holds; one of its two consumers is live.
+
+### Still intent (unchanged, recorded so this section doesn't overclaim)
+
+The **frame itself is not yet playable**: §1 (survival-not-score) is still a
+way-station of score + lives, because the win object that converts it is not
+built. §2's hidden **MicroNuke Power Plant**, §4's **hint mechanism** (still
+*intent*, by design, until there's a plant and an intel pickup to feel it
+against), and "several enterable buildings" (today there is one) are the
+remaining content. The §7 balance dials (plant-depth vs hint-earliness, the
+plateau-vs-unwinnable question, the Flatbed's real weapon-selection AI) stay
+**open on purpose** — they want the search in hand before they're tuned. The next
+step (the outcome payload + the plant/intel placement decorator) is the first of
+these to land, and §4's hint earns its revision *from intent to mechanism* only
+once that interior content exists to design it around.

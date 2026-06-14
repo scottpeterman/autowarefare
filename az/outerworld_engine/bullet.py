@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -87,6 +88,15 @@ class Bullet:
                                 # (see common.weapon). Default 1.0 = arcade
                                 # one-hit kill vs a default-HP target, so a
                                 # hand-built Bullet with no damage stays lethal.
+    shooter: Any = None         # identity of the firing entity (the camera for
+                                # the player, the Tank for an enemy). Distinct
+                                # from `owner`: `owner` is the hit-test bucket
+                                # ('player'/'enemy'), `shooter` is *which* entity
+                                # fired. The ballistic fire-control gates per
+                                # shooter on this (common.weapon), so six enemies
+                                # each get their own live-round cap instead of
+                                # the whole field sharing one. None = ungated by
+                                # shooter (hand-built rounds, legacy per-owner).
 
     def step(self) -> None:
         """Advance one tick: move by (vx, vz), decrement range.
