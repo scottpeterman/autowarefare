@@ -26,9 +26,10 @@ about this convention crosses the portal seam — only ``PlayerState`` does.
 from __future__ import annotations
 
 from OpenGL.GL import (
-    GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_DEPTH_TEST, GL_LEQUAL,
-    GL_LESS, GL_LINE_LOOP, GL_LINES, GL_MODELVIEW, GL_POLYGON,
-    GL_PROJECTION, glBegin, glClear, glClearColor, glClearDepth, glColor3f,
+    GL_BLEND, GL_COLOR_BUFFER_BIT, GL_COLOR_LOGIC_OP, GL_DEPTH_BUFFER_BIT,
+    GL_DEPTH_TEST, GL_LEQUAL, GL_LIGHTING, GL_LINE_LOOP, GL_LINES,
+    GL_LESS, GL_MODELVIEW, GL_POLYGON, GL_PROJECTION, GL_TEXTURE_2D, GL_TRUE,
+    glBegin, glClear, glClearColor, glClearDepth, glColor3f, glColorMask,
     glDepthFunc, glDisable, glEnable, glEnd, glLineWidth, glLoadIdentity,
     glMatrixMode, glRotatef, glScalef, glTranslatef,
     glVertex3f, glViewport,
@@ -63,6 +64,20 @@ def draw_interior(*, dungeon, bsp_tree, cam_x: float, cam_y: float,
     eye height in the -Y-up space (Bane uses ``-15``). The caller (IndoorWorld)
     owns all of this state; this function is stateless drawing only.
     """
+    # Re-establish a clean fixed-function color pipeline before any draw. The
+    # de-windowed renderer shed Bane's beginNativePainting/endNativePainting
+    # bracket, which used to make Qt save/restore GL state around raw GL. Without
+    # it, the QPainter HUD pass can leave blend / colormask / lighting / logic-op
+    # state dirty for the *next* frame, silently dropping a channel (the red-loss
+    # bug: white renders cyan, amber renders green, gold renders green). A guest
+    # issuing raw GL must assert the state it assumes — a colormask reset alone
+    # wasn't enough, so we also disable every stage that can modulate colour.
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)
+    glDisable(GL_BLEND)
+    glDisable(GL_LIGHTING)
+    glDisable(GL_TEXTURE_2D)
+    glDisable(GL_COLOR_LOGIC_OP)
+
     glClearColor(0.0, 0.0, 0.0, 1.0)
     glClearDepth(1.0)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
