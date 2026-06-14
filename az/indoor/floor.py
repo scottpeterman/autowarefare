@@ -9,15 +9,19 @@ first visit), the **stairwell column** cell, the floor's **start** landing, and 
 for floor 0 only — the building **exit** cell. Entities are reserved for step 4
 (the plant / intel placement) and ride along here so the slot is stable now.
 
-The stairwell is a **single shared column**: the same ``(gx, gz)`` cell is
-walkable on every floor of the stack, carved STAIRS on each. That choice is what
-makes the prompt-gated swap (press E, then push the way you want to go) cheap:
-the player always arrives at the same column on the floor they move to, so the
-"matching landing" contract from the design (floor i's up-stair == floor i+1's
-down-stair) is satisfied *by construction* — there is nothing to reconcile,
-because it is literally one cell coordinate shared up the whole tower. Which
-directions are offered is read from the floor's position in the stack, not from
-the cell's glyph, so a mid-floor offers both and an endpoint offers one.
+The stairwell is **per-link, not one global column**: between floor i and
+floor i+1 there is a single shared landing cell C_i, carved walkable on *both*
+floors. Floor i's ``up_cell`` and floor i+1's ``down_cell`` are that same
+coordinate, so the "matching landing" contract (floor i's up-stair == floor
+i+1's down-stair) still holds *by construction* — there is simply nothing to
+reconcile, per link. A middle floor therefore carries two stairs at (usually)
+different cells: a ``down_cell`` where you arrived from below, and an ``up_cell``
+you have to cross the floor to reach. Consecutive links can be clustered to
+share a core (the ``STAIR_RUN`` dial in ``floor_source``), so a tall tower reads
+as a few distinct stair cores rather than one chimney; set the run >= the floor
+count and it collapses back to a single shared column. Floor 0 has no
+``down_cell``; the roof has no ``up_cell``. Which key is offered is read from
+which stair cell the player stands on, not from the cell's glyph.
 
 Pure data + a lazy BSP cache. No GL, no Qt, no shell coupling.
 """
@@ -40,7 +44,8 @@ class FloorRuntime:
     landings the indoor world repositions the camera against."""
 
     dungeon: DungeonMap
-    stair_cell: Cell | None = None     # the shared stairwell column on this floor
+    up_cell: Cell | None = None        # this floor's up-stair (None on the roof)
+    down_cell: Cell | None = None      # this floor's down-stair (None on floor 0)
     start_cell: Cell | None = None     # spawn / arrival landing for this floor
     exit_cell: Cell | None = None      # building exit — floor 0 only
     entities: list[Any] = field(default_factory=list)   # reserved for step 4

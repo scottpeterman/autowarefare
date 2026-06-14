@@ -33,11 +33,14 @@ from az.indoor.floor import FloorRuntime
 Cell = tuple[int, int]
 Footprint = tuple[float, float]
 
-# Grid envelope clamp (cells). The outdoor footprints are small relative to
-# CELL_SIZE, so most buildings floor to the minimum — the deliberate "bigger
-# inside than out" tone call (session 8 open tension). Footprint still modulates
-# breadth above the floor, which is the dimension the test pins.
-MIN_GRID = 14
+# Grid envelope: footprint (outdoor half-extents) sets the *requested* breadth;
+# the per-archetype ``min_grid`` is the floor it clamps up to, and ``MAX_GRID``
+# the ceiling. The outdoor footprints are small relative to CELL_SIZE, so most
+# buildings still floor to their archetype minimum — the deliberate "bigger
+# inside than out" tone call (session 8 open tension). What changed: the floor
+# is no longer one global 14 for everything. A skyscraper floors *broad* (a real
+# tower plate) while a closet stays tight, so depth and breadth both read off the
+# archetype instead of every building sharing one 14x14 plate.
 MAX_GRID = 40
 
 
@@ -45,21 +48,34 @@ MAX_GRID = 40
 class _Archetype:
     floors: int           # depth — the dive's vertical character
     room_attempts: int    # density — how many rooms the generator tries
+    min_room: int         # room-size spread floor (cells) — the closet
+    max_room: int         # room-size spread ceiling (cells) — the grand hall
+    min_grid: int         # breadth floor — the per-archetype envelope clamp
 
 
-# Archetype → floor count + density. These are §7 balance dials, not law — the
-# one table to tune the curve without touching the engine generator.
-#   warehouse  — 1 wide, sparse floor (cover; a fast low-value check)
-#   small      — 1 token floor
-#   large      — 2 floors, quick clear
-#   skyscraper — the deep dive, the highest reward odds
+# Archetype → floor count + density + room-size spread + breadth. These are §7
+# balance dials, not law — the one table to tune the curve without touching the
+# engine generator. Each row now carries a *texture*, not just a height:
+#   warehouse  — 1 broad, sparse floor of big open rooms (cover; fast low check)
+#   small      — 1 tight token floor, small rooms
+#   large      — 2 mid floors, moderate spread
+#   skyscraper — the deep dive: 5 broad floors, widest room spread (halls next
+#                to closets), highest reward odds — the tower worth climbing
 ARCHETYPES: dict[str, _Archetype] = {
-    "warehouse":  _Archetype(floors=1, room_attempts=5),
-    "small":      _Archetype(floors=1, room_attempts=4),
-    "large":      _Archetype(floors=2, room_attempts=9),
-    "skyscraper": _Archetype(floors=5, room_attempts=12),
+    "warehouse":  _Archetype(floors=1, room_attempts=10, min_room=4, max_room=8, min_grid=22),
+    "small":      _Archetype(floors=1, room_attempts=4,  min_room=3, max_room=6, min_grid=14),
+    "large":      _Archetype(floors=2, room_attempts=9,  min_room=4, max_room=7, min_grid=18),
+    "skyscraper": _Archetype(floors=5, room_attempts=14, min_room=3, max_room=8, min_grid=26),
 }
 _DEFAULT_ARCHETYPE = ARCHETYPES["large"]
+
+# Stairwell run length (§7 dial): how many consecutive inter-floor links share a
+# single stair core before a new core is placed elsewhere on the plate. run=2
+# reads as "floors 0-1-2 climb one core, then you cross the floor to a second
+# core for 2-3-4." A run >= the floor count collapses to one shared column up
+# the whole tower (the pre-segmentation behavior). Buildings with <=2 floors
+# have at most one link, so this never affects them — it is the skyscraper dial.
+STAIR_RUN = 2
 
 
 def _spec(archetype: str) -> _Archetype:
@@ -73,13 +89,14 @@ def _derive(seed: int, index: int) -> int:
     return (int(seed) * 2654435761 + index * 40503 + 0x9E3779B9) & 0xFFFFFFFF
 
 
-def _envelope(footprint: Footprint) -> tuple[int, int]:
-    """Footprint (outdoor half-extents) -> grid width/height in cells. Breadth."""
+def _envelope(footprint: Footprint, min_grid: int) -> tuple[int, int]:
+    """Footprint (outdoor half-extents) -> grid width/height in cells. Breadth.
+    Clamps up to the archetype's ``min_grid`` floor and down to ``MAX_GRID``."""
     hw, hd = footprint
     width = round(2.0 * hw / CELL_SIZE)
     height = round(2.0 * hd / CELL_SIZE)
-    width = max(MIN_GRID, min(MAX_GRID, width))
-    height = max(MIN_GRID, min(MAX_GRID, height))
+    width = max(min_grid, min(MAX_GRID, width))
+    height = max(min_grid, min(MAX_GRID, height))
     return width, height
 
 
@@ -128,7 +145,7 @@ class ProceduralSource:
             return cached
 
         spec = _spec(archetype)
-        width, height = _envelope(footprint)
+        width, height = _envelope(footprint, spec.min_grid)
         n = spec.floors
 
         # Generate each floor's geometry (breadth + density from the gradient).
@@ -137,44 +154,55 @@ class ProceduralSource:
         for i in range(n):
             d, rooms = generate_dungeon(
                 width, height, seed=_derive(seed, i),
-                room_attempts=spec.room_attempts)
+                room_attempts=spec.room_attempts,
+                min_room=spec.min_room, max_room=spec.max_room)
             grids.append(d)
             roomsets.append(rooms)
 
-        # Inter-floor stair linking (the one net-new subsystem). A single shared
-        # stairwell column, the same (gx, gz) on every floor, carved into each
-        # floor's connected region. Because it is one cell coordinate shared up
-        # the stack, the matching-landing contract (floor i's stair == floor
-        # i+1's stair) holds by construction — there is nothing to reconcile.
+        # Inter-floor stair linking (the one net-new subsystem). Stairs are
+        # per-link shared cells: between floor i and i+1 there is one landing
+        # cell C_i, carved walkable on BOTH floors, so floor i's up-stair and
+        # floor i+1's down-stair are the same coordinate — the matching-landing
+        # contract holds per link by construction, nothing to reconcile. Links
+        # cluster into cores (STAIR_RUN) dispersed across the plate, so a tall
+        # tower makes you cross a floor to find the next core rather than ride
+        # one chimney.
         floors: list[FloorRuntime] = []
-        column: Cell | None = None
-        if n > 1:
-            column = self._choose_column(grids, roomsets, seed)
+        link_cells = self._choose_cores(grids, roomsets, n, STAIR_RUN)  # len n-1
 
         for i in range(n):
             d = grids[i]
             rooms = roomsets[i]
-            stair_cell = None
-            if column is not None:
-                # Carve the column into this floor's connected region: join it
-                # to the nearest room so the stairwell is never stranded, then
-                # stamp the glyph (cosmetic — direction is read from the floor
-                # index, not the glyph).
-                self._carve_column(d, rooms, column)
-                d.set_cell(*column, CellType.STAIRS_UP if i < n - 1
-                           else CellType.STAIRS_DOWN)
+            up_cell = link_cells[i] if i < n - 1 else None      # climb from here
+            down_cell = link_cells[i - 1] if i > 0 else None    # arrived here
+
+            # Carve each present stair cell into this floor's connected region
+            # and stamp its glyph (cosmetic — the runtime reads up_cell/down_cell,
+            # not the glyph). A within-run middle floor has up_cell == down_cell
+            # (a chimney point): carving twice is harmless, and the single cell
+            # is left stamped UP.
+            for cell in (down_cell, up_cell):
+                if cell is not None:
+                    self._carve_column(d, rooms, cell)
+            if down_cell is not None and down_cell != up_cell:
+                d.set_cell(*down_cell, CellType.STAIRS_DOWN)
+            if up_cell is not None:
+                d.set_cell(*up_cell, CellType.STAIRS_UP)
+            if up_cell is not None or down_cell is not None:
                 d.generate_walls()
-                stair_cell = column
 
             if i == 0:
-                start = self._entrance(rooms, column)
+                start = self._entrance(rooms, up_cell)
                 floors.append(FloorRuntime(
-                    dungeon=d, stair_cell=stair_cell,
+                    dungeon=d, up_cell=up_cell, down_cell=down_cell,
                     start_cell=start, exit_cell=start))   # enter == leave (§6)
             else:
-                # Upper floors: you arrive at the column.
+                # Upper floors default to landing on the down-stair (where you
+                # arrive climbing up); a descending arrival repositions onto the
+                # up-stair in IndoorWorld._change_floor.
                 floors.append(FloorRuntime(
-                    dungeon=d, stair_cell=stair_cell, start_cell=column))
+                    dungeon=d, up_cell=up_cell, down_cell=down_cell,
+                    start_cell=down_cell))
 
         self._cache[key] = floors
         return floors
@@ -182,25 +210,45 @@ class ProceduralSource:
     # --- geometry helpers ------------------------------------------------
 
     @staticmethod
-    def _entrance(rooms: list[Cell], column: Cell | None) -> Cell:
-        """Floor-0 spawn / exit: the room centre farthest from the stairwell
-        column (so you don't spawn on the stairs), deterministic. With no column
-        (single-floor building) just the first room."""
-        if column is None or len(rooms) == 1:
+    def _entrance(rooms: list[Cell], up_cell: Cell | None) -> Cell:
+        """Floor-0 spawn / exit: the room centre farthest from the up-stair (so
+        you don't spawn on the stairs), deterministic. With no up-stair (a
+        single-floor building) just the first room."""
+        if up_cell is None or len(rooms) == 1:
             return rooms[0]
-        return max(rooms, key=lambda c: abs(c[0] - column[0])
-                   + abs(c[1] - column[1]))
+        return max(rooms, key=lambda c: abs(c[0] - up_cell[0])
+                   + abs(c[1] - up_cell[1]))
 
     @staticmethod
-    def _choose_column(grids, roomsets, seed: int) -> Cell:
-        """Pick the shared stairwell column deterministically: a room centre
-        present on floor 0, biased toward the grid interior. It need not be
-        walkable on the other floors yet — ``_carve_column`` joins it in."""
-        rooms = roomsets[0]
-        # the room nearest the grid centre reads as a natural stairwell hall
+    def _choose_cores(grids, roomsets, n: int, run: int) -> list[Cell]:
+        """Per-link landing cells (length ``n-1``). Links group into cores of
+        ``run`` consecutive links sharing one cell; cores are dispersed across
+        the plate so a multi-core tower makes you cross the floor to reach the
+        next stairwell. Deterministic — pure geometry over the seeded room list,
+        no rng.
+
+        Candidate pool is floor 0's room centres: stable, and spread across the
+        (now broad) plate. ``_carve_column`` joins whatever is picked into every
+        floor, so a pick need not already be walkable above floor 0."""
+        if n < 2:
+            return []
+        num_links = n - 1
+        num_cores = (num_links + run - 1) // run            # ceil
         w, h = grids[0].width, grids[0].height
         cx, cz = w // 2, h // 2
-        return min(rooms, key=lambda c: abs(c[0] - cx) + abs(c[1] - cz))
+        pool: list[Cell] = list(roomsets[0]) or [(cx, cz)]
+
+        cores: list[Cell] = []
+        for _ in range(num_cores):
+            if not cores:
+                # first core nearest the grid centre — the building's main core
+                pick = min(pool, key=lambda p: abs(p[0] - cx) + abs(p[1] - cz))
+            else:
+                # disperse: maximize distance to the nearest core already chosen
+                pick = max(pool, key=lambda p: min(
+                    abs(p[0] - q[0]) + abs(p[1] - q[1]) for q in cores))
+            cores.append(pick)
+        return [cores[i // run] for i in range(num_links)]
 
     @staticmethod
     def _carve_column(dungeon, rooms: list[Cell], column: Cell) -> None:

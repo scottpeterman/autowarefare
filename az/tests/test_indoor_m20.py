@@ -82,11 +82,16 @@ def test_e_exit_zone_transitions_and_clears() -> None:
     w, state = _entered()
     # not on the exit yet -> no transition
     assert w.update(DT, ACTION, state) is None
+    # Step 4 changed the clear gate: mark_cleared fires only on a top-reached
+    # exit, not every exit. Simulate having climbed the stack so this exit is a
+    # genuine clear (the step-2 unconditional flag is gone).
+    w.max_floor = len(w.floors) - 1
     # teleport into the exit zone, tap action -> hand back + cleared
     w.cam_x, w.cam_z = w.exit_x, w.exit_z
     t = w.update(DT, ACTION, state)
     assert isinstance(t, Transition) and t.target == "outdoor"
     assert t.payload.get("from") == "tower_a"
+    assert t.payload.get("cleared") is True
     assert state.has_cleared("tower_a")
     print(f"  exit at {EXIT_CELL} -> Transition(outdoor), cleared=tower_a")
 

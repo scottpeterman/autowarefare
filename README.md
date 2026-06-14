@@ -16,7 +16,7 @@ renders are now **stacks of procedurally-generated floors** you climb.
 
 # But First! 
 I didn't write most of this. I architected it and evaluated every line — and the only reason that produces something coherent instead of garbage is the thirty years of reading code that lets me tell the difference
-But it took many hours none-the-less... lets call it "Supervised Software Synthesis""
+But it took many hours none-the-less... lets call it "Supervised Software Synthesis"
 
 ###
 "Supervised Software Synthesis" — software produced by authoring the architecture and specification, directing a generative model to synthesize the implementation, and evaluating every line against the author's own engineering judgment. The model writes; the engineer is accountable. It is distinguished from "vibe coding" by exactly that evaluation function: it requires the literacy to tell correct from plausible, and it fails without it. -- source Claude Opus 4.8

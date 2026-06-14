@@ -10,13 +10,15 @@ seam (outdoor <-> indoor) carrying only ``PlayerState``; a staircase swaps the
 active ``(dungeon, bsp_tree)`` pair *within* this world and repositions the
 camera. The shell never sees it.
 
-The stair mechanic is **prompt-gated** on a single shared stairwell column:
-stand on the column, press E (action), and push the way you want to go —
-forward ascends, back descends. The phosphor prompt is the question; the held
-direction is the answer. On an endpoint floor (ground or roof) there is only one
-way, so E alone takes it. This deletes the auto-on-contact debounce wholesale:
-walking across the column does nothing, and *arriving* on the destination column
-just shows the prompt again instead of bouncing you back.
+The stair mechanic is **prompt-gated** on per-link stair cells: stand on an
+up-stair and press U to climb, stand on a down-stair and press I to descend
+(dedicated edge keys mapped in the shell). A floor's up-stair and down-stair are
+usually different cells, so climbing in lands you at the down-stair and you have
+to cross the floor to find the next up-stair — except on a within-run chimney
+point, where the two coincide and both keys work. The phosphor prompt names
+whichever key the cell you're on offers. This deletes the auto-on-contact
+debounce wholesale: walking across a stair does nothing, and *arriving* on the
+destination stair just shows the prompt again instead of bouncing you back.
 
 ``depth`` (the M3 outcome payload's richest field) falls straight out of this:
 it is ``self.max_floor`` — the highest floor index reached this dive. The
@@ -68,13 +70,14 @@ def _build_default_floors() -> list[FloorRuntime]:
     d0 = create_test_dungeon()
     d0.set_cell(*STAIR_CELL, CellType.STAIRS_UP)
     d0.generate_walls()
-    f0 = FloorRuntime(dungeon=d0, stair_cell=STAIR_CELL,
+    f0 = FloorRuntime(dungeon=d0, up_cell=STAIR_CELL, down_cell=None,
                       start_cell=START_CELL, exit_cell=EXIT_CELL)
 
     d1 = create_test_dungeon()
     d1.set_cell(*STAIR_CELL, CellType.STAIRS_DOWN)
     d1.generate_walls()
-    f1 = FloorRuntime(dungeon=d1, stair_cell=STAIR_CELL, start_cell=STAIR_CELL)
+    f1 = FloorRuntime(dungeon=d1, up_cell=None, down_cell=STAIR_CELL,
+                      start_cell=STAIR_CELL)
 
     return [f0, f1]
 
@@ -96,6 +99,8 @@ class IndoorWorld:
         self._building = "tower_a"
         self._accum = 0.0
         self._floor_changed = False
+        self._found = False         # picked up the plant this dive -> payload
+        self._hint = False          # read the intel this dive -> payload
 
     # --- World protocol --------------------------------------------------
 
@@ -113,17 +118,28 @@ class IndoorWorld:
         archetype = payload.get("archetype")
         if archetype is not None:
             from az.indoor.floor_source import ProceduralSource
+            from az.indoor.placement import place_objectives
             src = ProceduralSource()
             footprint = payload.get("footprint", (200.0, 200.0))
             seed = payload.get("seed", 0)
             n = src.floor_count(archetype, footprint, seed)
             self.floors = [src.build_floor(archetype, footprint, seed, i)
                            for i in range(n)]
+            # Decorate the finished stack with objectives. Whether this building
+            # hides the plant is a game-level fact carried across the enter seam
+            # (vision §2); the intel lands in every dived building. The bare-
+            # payload fallback below stays objective-free, so the step-2/3 pins
+            # keep their geometry untouched.
+            place_objectives(self.floors,
+                             holds_plant=bool(payload.get("holds_plant", False)),
+                             seed=seed)
         else:
             self.floors = _build_default_floors()
 
         self.floor_index = 0
         self.max_floor = 0
+        self._found = False
+        self._hint = False
         self.cam_angle_deg = 0.0
         self._apply_floor(0, self.floors[0].start_cell)
         self._accum = 0.0
@@ -173,11 +189,15 @@ class IndoorWorld:
         if fr.exit_cell is not None:
             self.exit_x, self.exit_z = self.dungeon.grid_to_world(*fr.exit_cell)
 
-    def _change_floor(self, new_index: int) -> None:
-        """Take the stairwell to ``new_index``, arriving at that floor's shared
-        column. Heading is preserved (you face the way you were facing); the
-        accumulator break in update() makes this one-swap-per-frame."""
-        arrive = self.floors[new_index].stair_cell
+    def _change_floor(self, new_index: int, *, ascending: bool) -> None:
+        """Take the stairwell to ``new_index``. Arrival is the shared landing for
+        the link just traversed: climbing UP you land on the new floor's
+        down-stair (the cell you climbed through); descending, on its up-stair.
+        Both are the same coordinate as the stair you left, by the per-link
+        matching-landing contract. Heading is preserved; the accumulator break in
+        update() makes this one-swap-per-frame."""
+        fr = self.floors[new_index]
+        arrive = fr.down_cell if ascending else fr.up_cell
         self._apply_floor(new_index, arrive)
         self._floor_changed = True
 
@@ -187,9 +207,16 @@ class IndoorWorld:
     def _can_descend(self) -> bool:
         return self.floor_index - 1 >= 0
 
-    def _on_stair(self) -> bool:
-        gx, gz = self.dungeon.world_to_grid(self.cam_x, self.cam_z)
-        return (gx, gz) == self.floors[self.floor_index].stair_cell
+    def _player_cell(self) -> tuple[int, int]:
+        return self.dungeon.world_to_grid(self.cam_x, self.cam_z)
+
+    def _on_up_stair(self) -> bool:
+        up = self.floors[self.floor_index].up_cell
+        return up is not None and self._player_cell() == up
+
+    def _on_down_stair(self) -> bool:
+        down = self.floors[self.floor_index].down_cell
+        return down is not None and self._player_cell() == down
 
     # --- one native sim tick (ported from Bane _handle_input) ------------
 
@@ -221,25 +248,50 @@ class IndoorWorld:
                 nx, nz = old_x, old_z
         self.cam_x, self.cam_z = nx, nz
 
-        # Stairwell: on the column, U takes you up, I takes you down (dedicated
-        # edge keys, mapped in the shell). Dedicated rather than E+direction
-        # because a movement key would walk you off the single stairwell cell
-        # before the swap could fire. Endpoints simply have nothing to do for
-        # the unavailable direction. A swap consumes the frame (the accumulator
-        # break in update()), so one press = one floor.
-        if self._on_stair():
-            if inp.stair_up and self._can_ascend():
-                self._change_floor(self.floor_index + 1)
-                return None
-            if inp.stair_down and self._can_descend():
-                self._change_floor(self.floor_index - 1)
-                return None
+        # Objective pickup (walk-over, no action key — matches the exit zone's
+        # low-friction feel). Stepping onto an uncollected objective on this
+        # floor flips the dive-scoped flag the exit record reports; collecting
+        # the plant also drops it in the shared inventory so the outdoor side can
+        # read the win without widening the seam.
+        gx, gz = self._player_cell()
+        for ent in self.floors[self.floor_index].entities:
+            if not ent.collected and ent.cell == (gx, gz):
+                ent.collected = True
+                if ent.kind == "plant":
+                    self._found = True
+                    state.add_item("plant")
+                elif ent.kind == "intel":
+                    self._hint = True
+        # (dedicated edge keys, mapped in the shell). A within-run chimney point
+        # is both cells at once, so both keys work there. Dedicated keys rather
+        # than E+direction because a movement key would walk you off the stair
+        # cell before the swap could fire. A swap consumes the frame (the
+        # accumulator break in update()), so one press = one floor.
+        if inp.stair_up and self._on_up_stair() and self._can_ascend():
+            self._change_floor(self.floor_index + 1, ascending=True)
+            return None
+        if inp.stair_down and self._on_down_stair() and self._can_descend():
+            self._change_floor(self.floor_index - 1, ascending=False)
+            return None
 
         # Exit: gated to floor 0 (you leave the building only from the ground).
-        # Stand in the exit zone and tap action (E) -> clear + hand back.
+        # Stand in the exit zone and tap action (E) -> hand back the M3 outcome
+        # record. ``cleared`` is now a real outcome — true only when the top was
+        # reached this dive (a thorough search), not the old unconditional flag —
+        # so the cross-seam ledger means "searched to the top," which is what the
+        # return-from-dive escalation reads. Bailing at the entrance returns
+        # cleared=False and leaves the ledger untouched.
         if inp.action and self.floor_index == 0 and self._in_exit_zone():
-            state.mark_cleared(self._building)
-            return Transition("outdoor", {"from": self._building})
+            cleared = self.max_floor >= len(self.floors) - 1
+            if cleared:
+                state.mark_cleared(self._building)
+            return Transition("outdoor", {
+                "from":    self._building,
+                "cleared": cleared,
+                "depth":   self.depth,
+                "found":   self._found,
+                "hint":    self._hint or None,   # boolean now; §4 narrowing later
+            })
         return None
 
     # --- SpatialQuery ----------------------------------------------------
@@ -297,17 +349,24 @@ class IndoorWorld:
         return self.max_floor
 
     def status_text(self, state) -> str:
-        if self._on_stair():
-            up_ok, down_ok = self._can_ascend(), self._can_descend()
-            if up_ok and down_ok:
-                return "STAIRWELL — U: up   I: down"
-            if up_ok:
-                return "STAIRWELL — press U to climb"
-            if down_ok:
-                return "STAIRWELL — press I to descend"
+        on_up = self._on_up_stair()
+        on_down = self._on_down_stair()
+        if on_up and on_down:
+            return "STAIRWELL — U: up   I: down"
+        if on_up:
+            return "STAIRWELL — press U to climb"
+        if on_down:
+            return "STAIRWELL — press I to descend"
         if self.floor_index == 0 and self._in_exit_zone():
             return "EXIT — press E to leave the tower"
-        return (f"floor {self.floor_index}/{len(self.floors) - 1}   "
+        # Per-floor flag count: how many objectives sit on THIS floor and how
+        # many you've collected. Tells you whether you've swept the floor you're
+        # on without revealing the building total (so it never leaks whether the
+        # plant is in this building — only that this floor still holds something).
+        ents = self.floors[self.floor_index].entities
+        m = len(ents)
+        flags = f"   flags {sum(e.collected for e in ents)}/{m}" if m else ""
+        return (f"floor {self.floor_index}/{len(self.floors) - 1}{flags}   "
                 "move: W/S  turn: A/D")
 
     # --- draw ------------------------------------------------------------
@@ -317,17 +376,21 @@ class IndoorWorld:
         # The exit marker only exists on the ground floor.
         exit_world = ((self.exit_x, self.exit_z)
                       if self.floor_index == 0 else None)
-        # The stairwell marker, with the directions this floor offers — so an
-        # endpoint shows one way and a mid-floor shows both.
-        stair_world = None
-        stair_dirs = (False, False)
-        if fr.stair_cell is not None:
-            stair_world = self.dungeon.grid_to_world(*fr.stair_cell)
-            stair_dirs = (self._can_ascend(), self._can_descend())
+        # Stair markers: an up-glyph at the up-stair, a down-glyph at the
+        # down-stair. They're independent cells now; on a chimney-point floor the
+        # two coincide and the glyphs composite into the both-ways hourglass.
+        up_world = (self.dungeon.grid_to_world(*fr.up_cell)
+                    if fr.up_cell is not None else None)
+        down_world = (self.dungeon.grid_to_world(*fr.down_cell)
+                      if fr.down_cell is not None else None)
+        # Uncollected objectives on this floor, as (world_x, world_z, kind).
+        objectives = [(*self.dungeon.grid_to_world(*ent.cell), ent.kind)
+                      for ent in fr.entities if not ent.collected]
         renderer.draw_interior(
             dungeon=self.dungeon, bsp_tree=self.bsp_tree,
             cam_x=self.cam_x, cam_y=EYE_Y, cam_z=self.cam_z,
             cam_angle_deg=self.cam_angle_deg, vp_w=vp_w, vp_h=vp_h,
             exit_world=exit_world, exit_half=EXIT_HALF,
-            stair_world=stair_world, stair_dirs=stair_dirs,
+            up_world=up_world, down_world=down_world,
+            objectives=objectives,
         )

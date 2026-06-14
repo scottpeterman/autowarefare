@@ -27,6 +27,7 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPainter, QSurfaceFormat
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+from OpenGL.GL import GL_TRUE, glColorMask
 
 from az.hud.compositor import Hud
 from az.indoor.world import IndoorWorld
@@ -196,6 +197,16 @@ class ShellApp(QOpenGLWidget):
         ratio = self.devicePixelRatio()
         vp_w = max(1, int(self.width() * ratio))
         vp_h = max(1, int(self.height() * ratio))
+
+        # The QPainter HUD pass (below) leaves GL state dirty for the next frame:
+        # Qt's paint engine masks the red channel during compositing, and the
+        # de-windowed renderers shed Bane's beginNativePainting bracket that used
+        # to save/restore GL state around raw GL. Without that, last frame's
+        # masked red bleeds into this one and every high-red draw loses its red
+        # (amber stairs -> green, gold flag -> green, magenta -> blue). Re-enable
+        # all channels before handing raw GL to the world — covers both worlds at
+        # the one seam where the leak actually happens.
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE)
 
         self.active.draw(vp_w, vp_h)
 

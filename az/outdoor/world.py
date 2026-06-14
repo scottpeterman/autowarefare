@@ -400,6 +400,11 @@ class OutdoorWorld:
                 "archetype": "skyscraper",
                 "footprint": (SKYSCRAPER_HW, SKYSCRAPER_HD),
                 "seed":      TOWER_SEED,
+                # Which building hides the plant is a game-level fact (vision §2).
+                # With one enterable building today it IS the plant building, so
+                # the win is reachable to test; the real per-run assignment lands
+                # when there are several enterable buildings to choose among.
+                "holds_plant": True,
             })
         return None
 

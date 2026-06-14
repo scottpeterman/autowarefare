@@ -43,6 +43,8 @@ FILL_INTENSITY = 0.15
 GRID_RGB = (0.0, 0.22, 0.32)
 EXIT_RGB = (0.25, 1.0, 0.5)
 STAIR_RGB = (1.0, 0.7, 0.1)      # amber — distinct from exit-green and wall-blue
+PLANT_RGB = (1.0, 0.84, 0.0)     # bright gold — the win object (vision §2)
+INTEL_RGB = (1.0, 0.2, 0.85)     # bright magenta — information, distinct from gold
 
 FOV_DEG = 75.0
 NEAR, FAR = 1.0, 1000.0      # Bane's own near/far; interiors are bounded
@@ -52,8 +54,9 @@ def draw_interior(*, dungeon, bsp_tree, cam_x: float, cam_y: float,
                   cam_z: float, cam_angle_deg: float, vp_w: int, vp_h: int,
                   exit_world: tuple[float, float] | None = None,
                   exit_half: float = 25.0,
-                  stair_world: tuple[float, float] | None = None,
-                  stair_dirs: tuple[bool, bool] = (False, False)) -> None:
+                  up_world: tuple[float, float] | None = None,
+                  down_world: tuple[float, float] | None = None,
+                  objectives: list | None = None) -> None:
     """Render one indoor frame into the shell's already-current GL context.
 
     ``cam_angle_deg`` is degrees about +Y (Bane convention). ``cam_y`` is the
@@ -106,9 +109,21 @@ def draw_interior(*, dungeon, bsp_tree, cam_x: float, cam_y: float,
     if exit_world is not None:
         _draw_exit_marker(exit_world[0], exit_world[1], exit_half)
 
-    if stair_world is not None:
-        _draw_stair_marker(stair_world[0], stair_world[1],
-                           stair_dirs[0], stair_dirs[1])
+    # Up-stair and down-stair are independent cells now: an up-glyph at the
+    # up-stair, a down-glyph at the down-stair. On a chimney-point floor they
+    # share a cell and the two single-direction glyphs composite into the old
+    # both-ways hourglass for free.
+    if up_world is not None:
+        _draw_stair_marker(up_world[0], up_world[1], True, False)
+    if down_world is not None:
+        _draw_stair_marker(down_world[0], down_world[1], False, True)
+
+    # Objective markers: a plant (hot magenta) or intel (cyan) diamond beacon,
+    # cell-keyed and stateless like the exit/stair glyphs. The caller passes only
+    # uncollected objectives, so a picked-up one simply stops being drawn.
+    for ox, oz, kind in (objectives or []):
+        _draw_objective_marker(ox, oz, PLANT_RGB if kind == "plant"
+                               else INTEL_RGB)
 
     glLineWidth(1.0)
     # Leave the context QPainter-safe for the shell's HUD pass (the validated
@@ -226,3 +241,34 @@ def _draw_stair_marker(cx: float, cz: float,
             t = i / steps
             _square_loop(cx, cz, half * (1.0 - 0.55 * t),
                          -2.0 + t * (CELL_SIZE * 0.30))
+
+def _draw_objective_marker(cx: float, cz: float, rgb) -> None:
+    """A flag: a tall pole rising nearly to the ceiling with a triangular pennant
+    near the top, plus a small floor base so it roots visibly. Tall and bright so
+    it's spotted from across the room — the 'come search here' read the diamond
+    didn't carry. Drawn only for uncollected objectives (the caller filters);
+    colour tells plant (gold) from intel (magenta)."""
+    from az.innerworld_engine import CELL_SIZE
+    base_y = -2.0
+    top_y = -CELL_SIZE * 1.05          # -Y is up: nearly to the ceiling
+    glColor3f(*rgb)
+    glLineWidth(3.0)
+
+    # pole
+    glBegin(GL_LINES)
+    glVertex3f(cx, base_y, cz)
+    glVertex3f(cx, top_y, cz)
+    glEnd()
+
+    # pennant — a triangle flying off the top of the pole (+x side)
+    flag_w = CELL_SIZE * 0.34
+    flag_drop = CELL_SIZE * 0.22       # +Y is down, so the pennant hangs below apex
+    glBegin(GL_LINE_LOOP)
+    glVertex3f(cx, top_y, cz)
+    glVertex3f(cx + flag_w, top_y + flag_drop * 0.5, cz)
+    glVertex3f(cx, top_y + flag_drop, cz)
+    glEnd()
+
+    # small base footprint so the pole reads as planted on the floor
+    glLineWidth(2.0)
+    _square_loop(cx, cz, 8.0, base_y)

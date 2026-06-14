@@ -94,6 +94,10 @@ def test_d_portal_roundtrip_persists_state() -> None:
     # PlayerState carried through intact. Teleport to the exit cell rather than
     # navigate the dungeon, mirroring the outdoor lobby teleport above.
     hp_before = state.health
+    # Step 4 changed the clear gate: mark_cleared fires only on a top-reached
+    # exit. Simulate the full climb so this round-trip exit is a genuine clear
+    # (the round-trip mechanics are what this test pins, not the navigation).
+    active.max_floor = len(active.floors) - 1
     active.cam_x, active.cam_z = active.exit_x, active.exit_z
     t = active.update(DT, ACTION, state)
     assert t is not None and t.target == "outdoor"
