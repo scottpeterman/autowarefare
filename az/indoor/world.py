@@ -33,11 +33,14 @@ portal — never coordinates, never the vertical axis.
 from __future__ import annotations
 
 import math
+import random
 from typing import Any
 
 from az.innerworld_engine import CELL_SIZE, CellType, create_test_dungeon
 from az.indoor import renderer
 from az.indoor.floor import FloorRuntime
+from az.indoor.mob import ENEMY_RADIUS
+from az.indoor.projectile import BOLT_HIT_RADIUS
 from az.shell.mode import InputState, Transition
 
 # --- feel knobs (Bane-native per-tick constants; do NOT rescale to seconds) --
@@ -46,6 +49,29 @@ INDOOR_FORWARD_SPEED = 3.0       # world units / tick  (Bane _handle_input speed
 INDOOR_TURN_SPEED_DEG = 2.0      # degrees / tick       (Bane _handle_input turn)
 BODY_RADIUS = 12.0               # collision radius     (Bane collision_radius)
 EYE_Y = -15.0                    # eye height in -Y-up space (Bane cam_y)
+
+# --- player melee strike (M2.2): the one weapon the player has indoors so the
+# mobs are fightable, not just avoidable. The first-person staff *overlay* is
+# M2.3 art; this is the mechanic. Fire (Space) swings; mobs in a forward arc
+# within reach take STRIKE_DAMAGE, cadence-gated. ---
+STRIKE_RANGE = 62.0              # reach, indoor units (a touch past melee contact)
+STRIKE_HALF_ARC = 0.62           # cos gate ~ 52 deg half-arc in front
+STRIKE_DAMAGE = 2                # knifeman (1hp) one-shot; thug (3hp) in two
+STRIKE_COOLDOWN = 22             # ticks between swings
+
+# Inter-mob spacing: mobs jostle apart to this centre distance so two converging
+# on the same spot fan into an arc around the player instead of fusing into one
+# blob. ~2.2x body radius — shoulder-to-shoulder, still able to gang up.
+ENEMY_SEPARATION = ENEMY_RADIUS * 2.2
+
+# --- dwell-time escalation (within a building): the longer you stay, the more
+# often the building sends another mob onto your floor. This is the *intra-dive*
+# ramp — distinct from PlayerState.tier (the cross-dive ledger that sets how hard
+# a building STARTS). Heat is the building's response to your lingering; tier is
+# its baseline. They compose. Reset per dive (on_enter); persists across floors. -
+REINFORCE_BASE = 1080            # ticks before the first wave (~18s) — quiet to read
+REINFORCE_FLOOR = 360            # the fastest the building ever responds (~6s)
+REINFORCE_RAMP = 4800            # dwell ticks (~80s) over which the rate ramps in
 
 # Default-stack cells (the M2.0 test dungeon, verified walkable):
 #   start = (9, 9)   centre room — spawn
@@ -101,6 +127,12 @@ class IndoorWorld:
         self._floor_changed = False
         self._found = False         # picked up the plant this dive -> payload
         self._hint = False          # read the intel this dive -> payload
+        self._strike_cd = 0         # player melee-strike cooldown (ticks)
+        self._bolts = []            # gunman bolts in flight (active floor only)
+        self._dwell = 0             # ticks in this building this dive (heat clock)
+        self._reinforce_cd = 0      # ticks until the next reinforcement wave
+        self._populated = False     # only a populated (archetype) building reinforces
+        self._reinforce_rng = random.Random(0)
 
     # --- World protocol --------------------------------------------------
 
@@ -133,13 +165,28 @@ class IndoorWorld:
             place_objectives(self.floors,
                              holds_plant=bool(payload.get("holds_plant", False)),
                              seed=seed)
+            # Then populate the threat: live mobs scaled by the same escalation
+            # ledger the outdoor war reads (vision §6), so a deeper run into the
+            # search is harder inside as well as out. Live roster: thug, knifeman,
+            # and the gunman (melee-weighted).
+            from az.indoor.enemy_placement import place_enemies
+            place_enemies(self.floors, seed=seed, tier=getattr(state, "tier", 0))
+            # A populated building responds to dwelling with reinforcement waves.
+            # Seed a dedicated RNG (distinct salt from layout/loot/initial spawns)
+            # so the waves are reproducible per dive without correlating.
+            self._populated = True
+            self._reinforce_rng = random.Random(
+                (int(seed) * 2246822519 + 0xB5297A4D) & 0xFFFFFFFF)
         else:
             self.floors = _build_default_floors()
+            self._populated = False        # bare stack stays inert (M2.0 pins)
 
         self.floor_index = 0
         self.max_floor = 0
         self._found = False
         self._hint = False
+        self._dwell = 0                    # reset the heat clock for the new dive
+        self._reinforce_cd = REINFORCE_BASE
         self.cam_angle_deg = 0.0
         self._apply_floor(0, self.floors[0].start_cell)
         self._accum = 0.0
@@ -180,6 +227,7 @@ class IndoorWorld:
         unchanged — this is the whole floor-swap, exactly the seam the plan
         stands on."""
         self.floor_index = index
+        self._bolts = []            # bolts are floor-local; a swap voids them
         fr = self.floors[index]
         self.dungeon = fr.dungeon
         self.bsp_tree = fr.bsp()
@@ -262,6 +310,11 @@ class IndoorWorld:
                     state.add_item("plant")
                 elif ent.kind == "intel":
                     self._hint = True
+
+        # Enemies: the active floor's mobs chase + slash (damage -> PlayerState),
+        # then the player's strike (fire) culls those in the forward arc. M2.2
+        # melee; only the active floor updates (matching the pickup loop).
+        self._update_enemies(inp, state)
         # (dedicated edge keys, mapped in the shell). A within-run chimney point
         # is both cells at once, so both keys work there. Dedicated keys rather
         # than E+direction because a movement key would walk you off the stair
@@ -342,6 +395,140 @@ class IndoorWorld:
         return (abs(self.cam_x - self.exit_x) <= EXIT_HALF and
                 abs(self.cam_z - self.exit_z) <= EXIT_HALF)
 
+    def _update_enemies(self, inp: InputState, state) -> None:
+        """One tick of indoor combat on the active floor: step every live mob
+        (chase + slash into PlayerState), resolve the player's strike (fire, arc
+        + reach, cadence-gated), then cull the dead. Frozen at game over so a mob
+        can't keep swinging on a spent run."""
+        if state.is_game_over:
+            self._bolts = []
+            return
+
+        # Dwell-time escalation: a populated building sends reinforcements onto
+        # the current floor, faster the longer you linger (the wave fires before
+        # the step loop, so a new mob is live this same tick).
+        if self._populated:
+            self._dwell += 1
+            if self._reinforce_cd > 0:
+                self._reinforce_cd -= 1
+            if self._reinforce_cd <= 0:
+                self._spawn_reinforcement()
+                self._reinforce_cd = self._reinforce_interval()
+
+        mobs = self.floors[self.floor_index].enemies
+        for mob in mobs:
+            bolt = mob.step(self.cam_x, self.cam_z, self, state)
+            if bolt is not None:          # a gunman fired this tick
+                self._bolts.append(bolt)
+
+        self._update_bolts(state)
+
+        if self._strike_cd > 0:
+            self._strike_cd -= 1
+        if inp.fire and self._strike_cd <= 0:
+            self._player_strike(mobs)
+            self._strike_cd = STRIKE_COOLDOWN
+
+        # Rebind so a killed mob stops being stepped and drawn this same frame.
+        alive = [m for m in mobs if m.alive]
+        self.floors[self.floor_index].enemies = alive
+        self._separate_mobs(alive)
+
+    def _separate_mobs(self, mobs) -> None:
+        """Jostle overlapping mobs apart to ``ENEMY_SEPARATION`` so two closing on
+        the player fan into an arc instead of fusing. Each push is wall-aware and
+        half-strength, so a stack relaxes over a few ticks rather than snapping —
+        and a mob is never shoved through geometry."""
+        n = len(mobs)
+        if n < 2:
+            return
+        for i in range(n):
+            a = mobs[i]
+            for j in range(i + 1, n):
+                b = mobs[j]
+                dx, dz = b.x - a.x, b.z - a.z
+                d = math.hypot(dx, dz)
+                if d >= ENEMY_SEPARATION:
+                    continue
+                if d < 1e-6:                 # exact overlap: deterministic split
+                    dx, dz, d = 1.0, 0.0, 1.0
+                push = (ENEMY_SEPARATION - d) * 0.5
+                ux, uz = dx / d, dz / d
+                self._nudge(a, -ux * push, -uz * push)
+                self._nudge(b, ux * push, uz * push)
+
+    def _nudge(self, mob, dx: float, dz: float) -> None:
+        """Move a mob by (dx, dz) only if the destination clears walls."""
+        free, rx, rz = self.can_move_to(mob.x + dx, mob.z + dz, ENEMY_RADIUS)
+        if free:
+            mob.x, mob.z = rx, rz
+
+    def _reinforce_interval(self) -> int:
+        """Ticks until the next wave, ramping linearly from ``REINFORCE_BASE``
+        down to ``REINFORCE_FLOOR`` over ``REINFORCE_RAMP`` ticks of dwell — so
+        the building responds faster the longer the dive runs."""
+        t = min(1.0, self._dwell / REINFORCE_RAMP)
+        return int(REINFORCE_BASE - (REINFORCE_BASE - REINFORCE_FLOOR) * t)
+
+    def _spawn_reinforcement(self) -> bool:
+        """Drop one mob onto the current floor at a legal cell clear of the
+        player, preferring a cell the player can't currently see so it doesn't
+        pop into view. No-op (returns False) once the floor is at its live cap."""
+        from az.indoor.enemy_placement import (
+            legal_cells, spawn_mob, REINFORCE_CAP, RUNTIME_SPAWN_CLEAR)
+        from az.indoor.enemies import LIVE_ROSTER
+
+        fr = self.floors[self.floor_index]
+        if sum(m.alive for m in fr.enemies) >= REINFORCE_CAP:
+            return False
+        cells = legal_cells(fr, clear_from=self._player_cell(),
+                            clear_radius=RUNTIME_SPAWN_CLEAR)
+        if not cells:
+            return False
+        hidden = [c for c in cells
+                  if not self.line_of_sight(self.cam_x, self.cam_z,
+                                            *self.dungeon.grid_to_world(*c))]
+        pool = hidden or cells                  # arrive unseen when possible
+        cell = self._reinforce_rng.choice(pool)
+        spawn_mob(fr, cell, self._reinforce_rng.choice(LIVE_ROSTER),
+                  self._reinforce_rng)
+        return True
+
+    def _update_bolts(self, state) -> None:
+        """Fly every in-flight gunman bolt one tick: a wall or expiry drops it; a
+        bolt within ``BOLT_HIT_RADIUS`` of the player lands its damage through
+        the shared pool (respawn-grace and death handled like any other hit)."""
+        if not self._bolts:
+            return
+        live = []
+        for b in self._bolts:
+            b.advance()
+            if b.expired:
+                continue
+            gx, gz = self.dungeon.world_to_grid(b.x, b.z)
+            if not self.dungeon.is_walkable(gx, gz):
+                continue                  # spent on a wall
+            if math.hypot(b.x - self.cam_x, b.z - self.cam_z) <= BOLT_HIT_RADIUS:
+                state.take_damage(b.damage)
+                if state.is_dead:
+                    state.lose_life()
+                continue                  # spent on the player
+            live.append(b)
+        self._bolts = live
+
+    def _player_strike(self, mobs) -> None:
+        """A swing: every mob within ``STRIKE_RANGE`` and inside the forward arc
+        takes ``STRIKE_DAMAGE``. Forward is the player's (sin h, -cos h)."""
+        rad = math.radians(self.cam_angle_deg)
+        fx, fz = math.sin(rad), -math.cos(rad)
+        for mob in mobs:
+            dx, dz = mob.x - self.cam_x, mob.z - self.cam_z
+            dist = math.hypot(dx, dz)
+            if dist > STRIKE_RANGE or dist < 1e-6:
+                continue
+            if (dx / dist) * fx + (dz / dist) * fz >= STRIKE_HALF_ARC:
+                mob.hit(STRIKE_DAMAGE)
+
     @property
     def depth(self) -> int:
         """Max floor index reached this dive — the M3 outcome payload's richest
@@ -367,7 +554,7 @@ class IndoorWorld:
         m = len(ents)
         flags = f"   flags {sum(e.collected for e in ents)}/{m}" if m else ""
         return (f"floor {self.floor_index}/{len(self.floors) - 1}{flags}   "
-                "move: W/S  turn: A/D")
+                "move: W/S  turn: A/D  strike: SPACE")
 
     # --- draw ------------------------------------------------------------
 
@@ -386,11 +573,16 @@ class IndoorWorld:
         # Uncollected objectives on this floor, as (world_x, world_z, kind).
         objectives = [(*self.dungeon.grid_to_world(*ent.cell), ent.kind)
                       for ent in fr.entities if not ent.collected]
+        # Live mobs on this floor, as (world_x, world_z, facing_deg, name).
+        enemies = [(mob.x, mob.z, mob.facing_deg, mob.def_.name)
+                   for mob in fr.enemies if mob.alive]
+        # Gunman bolts in flight, as (world_x, world_z).
+        bolts = [(b.x, b.z) for b in self._bolts]
         renderer.draw_interior(
             dungeon=self.dungeon, bsp_tree=self.bsp_tree,
             cam_x=self.cam_x, cam_y=EYE_Y, cam_z=self.cam_z,
             cam_angle_deg=self.cam_angle_deg, vp_w=vp_w, vp_h=vp_h,
             exit_world=exit_world, exit_half=EXIT_HALF,
             up_world=up_world, down_world=down_world,
-            objectives=objectives,
+            objectives=objectives, enemies=enemies, bolts=bolts,
         )

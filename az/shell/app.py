@@ -58,6 +58,12 @@ _STAIR_DOWN_KEYS = {Qt.Key.Key_I}
 # reverse key, so screenshots live on P (easy reach) and F12 (muscle memory).
 # Saved to $AWF_SHOT_DIR (default ./screenshots) as a millisecond-stamped PNG.
 _SHOT_KEYS = {Qt.Key.Key_P, Qt.Key.Key_F12}
+# debug: freeze the sim ( ` ) and, while frozen, advance exactly one tick at a
+# time ( . ) — for studying fast motion like a gunman bolt mid-flight. Shell-
+# level, so it freezes BOTH worlds at once. The backtick is unbound; the literal
+# Pause key is accepted too where the keyboard has one.
+_PAUSE_KEYS = {Qt.Key.Key_QuoteLeft, Qt.Key.Key_Pause}
+_STEP_KEYS = {Qt.Key.Key_Period}
 
 
 class ShellApp(QOpenGLWidget):
@@ -86,6 +92,11 @@ class ShellApp(QOpenGLWidget):
         self._held: set[int] = set()
         self._edge: set[int] = set()
 
+        # debug freeze: _paused halts sim advance (both worlds); _step_once lets
+        # exactly one tick through while paused, for frame-by-frame inspection.
+        self._paused = False
+        self._step_once = False
+
         self._last = time.perf_counter()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -99,6 +110,17 @@ class ShellApp(QOpenGLWidget):
         self._last = now
         # clamp dt so an alt-tab stall can't teleport the player
         dt = min(dt, 0.05)
+
+        # Frozen: advance nothing (both worlds), but keep the frame/HUD live so
+        # the PAUSED indicator paints and the view stays responsive. Edges are
+        # dropped so a key tapped while paused doesn't queue up for the resume.
+        if self._paused and not self._step_once:
+            self._edge.clear()
+            self.update()
+            return
+        if self._step_once:
+            dt = TICK_MS / 1000.0      # one deterministic sim tick per tap
+            self._step_once = False
 
         inp = self._input_snapshot()
         self._edge.clear()  # edges are consumed by this frame only
@@ -136,6 +158,15 @@ class ShellApp(QOpenGLWidget):
             return
         if key in _SHOT_KEYS:
             self._save_screenshot()
+            return
+        if key in _PAUSE_KEYS:
+            self._paused = not self._paused
+            print(f"[pause] {'PAUSED — . steps one tick' if self._paused else 'resumed'}")
+            self.update()
+            return
+        if key in _STEP_KEYS:
+            if self._paused:          # only meaningful while frozen
+                self._step_once = True
             return
         self._held.add(key)
         self._edge.add(key)   # also an edge event this frame
@@ -215,6 +246,8 @@ class ShellApp(QOpenGLWidget):
         fn = getattr(self.active, "status_text", None)
         if callable(fn):
             status = fn(self.state)
+        if self._paused:
+            status = "PAUSED  ( . step   ` resume )   " + status
         wfn = getattr(self.active, "weapon_status", None)
         weapon = wfn() if callable(wfn) else None
         painter = QPainter(self)

@@ -31,7 +31,7 @@ from OpenGL.GL import (
     GL_LESS, GL_MODELVIEW, GL_POLYGON, GL_PROJECTION, GL_TEXTURE_2D, GL_TRUE,
     glBegin, glClear, glClearColor, glClearDepth, glColor3f, glColorMask,
     glDepthFunc, glDisable, glEnable, glEnd, glLineWidth, glLoadIdentity,
-    glMatrixMode, glRotatef, glScalef, glTranslatef,
+    glMatrixMode, glPopMatrix, glPushMatrix, glRotatef, glScalef, glTranslatef,
     glVertex3f, glViewport,
 )
 from OpenGL.GLU import gluPerspective
@@ -46,6 +46,12 @@ EXIT_RGB = (0.25, 1.0, 0.5)
 STAIR_RGB = (1.0, 0.7, 0.1)      # amber — distinct from exit-green and wall-blue
 PLANT_RGB = (1.0, 0.84, 0.0)     # bright gold — the win object (vision §2)
 INTEL_RGB = (1.0, 0.2, 0.85)     # bright magenta — information, distinct from gold
+MOB_RGB = (1.0, 0.27, 0.20)      # hot red — threat, distinct from blue/green/amber/gold
+BOLT_RGB = (1.0, 0.95, 0.40)     # hot yellow — gunman fire, distinct from red mobs
+
+# Baked, numpy-free enemy wireframes (indoor -Y-up space, +Z forward).
+from az.indoor.models.mobsters import MODELS as _MOB_MODELS
+from az.indoor.projectile import BOLT_Y
 
 FOV_DEG = 75.0
 NEAR, FAR = 1.0, 1000.0      # Bane's own near/far; interiors are bounded
@@ -57,7 +63,9 @@ def draw_interior(*, dungeon, bsp_tree, cam_x: float, cam_y: float,
                   exit_half: float = 25.0,
                   up_world: tuple[float, float] | None = None,
                   down_world: tuple[float, float] | None = None,
-                  objectives: list | None = None) -> None:
+                  objectives: list | None = None,
+                  enemies: list | None = None,
+                  bolts: list | None = None) -> None:
     """Render one indoor frame into the shell's already-current GL context.
 
     ``cam_angle_deg`` is degrees about +Y (Bane convention). ``cam_y`` is the
@@ -140,10 +148,56 @@ def draw_interior(*, dungeon, bsp_tree, cam_x: float, cam_y: float,
         _draw_objective_marker(ox, oz, PLANT_RGB if kind == "plant"
                                else INTEL_RGB)
 
+    # Enemy wireframes: the baked humanoid bodies, placed + faced per mob. Drawn
+    # at true depth (GL_LESS) so a wall occludes a mob behind it. Bodies are
+    # authored +Z forward; the per-mob rotation aims that +Z down the mob's
+    # heading (the same (sin h, -cos h) forward the player and walls share).
+    for ex, ez, facing_deg, name in (enemies or []):
+        model = _MOB_MODELS.get(name)
+        if model is not None:
+            _draw_enemy(model["lines"], ex, ez, facing_deg)
+
+    # Gunman bolts: a small bright glyph at chest height, so a shot reads as an
+    # object in flight you can sidestep — not an instant line.
+    for bx, bz in (bolts or []):
+        _draw_bolt(bx, bz)
+
     glLineWidth(1.0)
     # Leave the context QPainter-safe for the shell's HUD pass (the validated
     # GL-then-QPainter order in shell/app.py). Mirrors Bane's own teardown.
     glDisable(GL_DEPTH_TEST)
+
+
+def _draw_bolt(bx: float, bz: float, r: float = 5.0) -> None:
+    """A bolt in flight: a small bright 3-axis cross centred at chest height
+    (BOLT_Y), readable from any angle without billboarding."""
+    glColor3f(*BOLT_RGB)
+    glLineWidth(3.0)
+    glBegin(GL_LINES)
+    glVertex3f(bx - r, BOLT_Y, bz); glVertex3f(bx + r, BOLT_Y, bz)
+    glVertex3f(bx, BOLT_Y - r, bz); glVertex3f(bx, BOLT_Y + r, bz)
+    glVertex3f(bx, BOLT_Y, bz - r); glVertex3f(bx, BOLT_Y, bz + r)
+    glEnd()
+
+
+def _draw_enemy(lines, ex: float, ez: float, facing_deg: float) -> None:
+    """Draw one baked humanoid wireframe at (ex, ez) on the floor, faced along
+    its heading. The model is already in indoor -Y-up space (feet y=0, head at
+    negative y); we translate to the floor cell and rotate its +Z forward onto
+    the world heading. ``180 - facing`` maps model +Z=(0,0,1) to the world's
+    forward (sin h, -cos h) — the Y-flip in the modelview commutes with this
+    Y-rotation, so the heading is unaffected by it."""
+    glColor3f(*MOB_RGB)
+    glLineWidth(2.0)
+    glPushMatrix()
+    glTranslatef(ex, 0.0, ez)
+    glRotatef(180.0 - facing_deg, 0.0, 1.0, 0.0)
+    glBegin(GL_LINES)
+    for a, b in lines:
+        glVertex3f(a[0], a[1], a[2])
+        glVertex3f(b[0], b[1], b[2])
+    glEnd()
+    glPopMatrix()
 
 
 def _render_wall(wall, cam_x: float, cam_z: float,

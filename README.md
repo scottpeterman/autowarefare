@@ -5,11 +5,17 @@ vector city you drive, fight, and search on foot — built as two very different
 rendering engines hosted side by side behind one shell, sharing one game state
 across a single seam.
 
+<p align="center">
+  <img src="screenshots/aw_20260613_222258_840.png" width="100%" alt="A wide wireframe cityscape at night: cyberblue buildings and pyramids on the horizon, two enemy autos on the open battlefield, the player's reticle centered.">
+  <br><em>The battlefield — a dead vector city you drive across, hunting the building that hides the plant.</em>
+</p>
+
 This README is the entry point. It describes **what the project is** and **what
 actually works today**, then points at the deeper design docs for the *why* and
 the *how*. As of this milestone, the architecture is no longer a bet — a second,
-independent engine has been integrated into the shell, and the buildings it
-renders are now **stacks of procedurally-generated floors** you climb.
+independent engine has been integrated into the shell, the buildings it renders
+are **stacks of procedurally-generated floors** you climb, and those interiors
+now **fight back**.
 
 
 ---
@@ -30,6 +36,11 @@ replacement **MicroNuke Power Plant** hidden in one of the buildings. Finding it
 means diving buildings to search them, and every time you climb back out into
 the battlefield the war has escalated. The whole map is a search problem wrapped
 in a war, and the difficulty curve *is* the player's own search behavior.
+
+<p align="center">
+  <img src="screenshots/citiscape_opaque_tanks.png" width="90%" alt="First-person view between solid wireframe skyscrapers, enemy autos in the street ahead.">
+  <br><em>Driving the canyon between buildings — every skyscraper is a potential dive.</em>
+</p>
 
 That single design idea is why the game is built the way it is: there are two
 worlds — an **outdoor** battlefield and **indoor** building interiors — and the
@@ -55,10 +66,31 @@ terrain, and wireframe buildings; fire two switchable weapons (a ballistic shell
 and a heat-gated pulse rifle); and fight a **three-chassis enemy bestiary** for
 score, with the war already escalating as you search:
 
+<p align="center">
+  <img src="screenshots/aw_20260613_173132_301.png" width="90%" alt="The player fires the pulse rifle: a stream of glowing bolts arcs toward a wireframe city skyline, an enemy sedan to the left, score 009500.">
+  <br><em>The pulse rifle mid-burst — two switchable weapons, a unified damage economy, score on the line.</em>
+</p>
+
 - **Sedan / Pickup / Flatbed.** A fast-fragile pulse-MG swarm, a slow-tough
   shell-cannon bruiser, and a medium both-weapons elite — each its own
   wireframe, HP, handling, and loadout, driven by AI. Enemies fire back through
   the *same* engine-neutral weapon abstraction the player uses, owner-tagged.
+
+<table>
+  <tr>
+    <td align="center"><img src="screenshots/sedan.png" width="100%" alt="Sedan chassis wireframe"></td>
+    <td align="center"><img src="screenshots/pickup.png" width="100%" alt="Pickup chassis wireframe"></td>
+    <td align="center"><img src="screenshots/flatbed.png" width="100%" alt="Flatbed chassis wireframe"></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Sedan — fast, fragile</em></td>
+    <td align="center"><em>Pickup — slow, tough</em></td>
+    <td align="center"><em>Flatbed — medium elite</em></td>
+  </tr>
+</table>
+
+<p align="center"><em>The three enemy chassis in the model viewer — distinct silhouettes, each with its own HP, handling, and loadout.</em></p>
+
 - **A spawn director** turns one input — a `tier` that **bumps each time you
   return from a building dive** (the Milestone-3 escalation ratchet, not a clock)
   — into how many enemies hold the field and who they are. Population rises then
@@ -75,7 +107,12 @@ Drive to the landmark skyscraper and press **E** to enter it.
 **The indoor world** — the *Castle of Bane* wireframe dungeon core
 (`innerworld_engine`: grid `DungeonMap`, BSP-ordered walls, the `.map` cell
 vocabulary), de-windowed and hosted as a shell guest, now driving **multi-floor
-procedurally-generated buildings**:
+procedurally-generated buildings** you must search and fight through:
+
+<p align="center">
+  <img src="screenshots/indoor-ban-engine-integrated.png" width="90%" alt="First-person interior: cyberblue wireframe rooms and corridors in -Y-up space, a green exit marker in a far room.">
+  <br><em>Inside a dive — first-person grid movement through a generated floor, the green exit marking the way back to the battlefield.</em>
+</p>
 
 - **A building is a stack of floors; a floor is a grid dungeon.** Entering the
   skyscraper builds a five-floor tower you climb, walk first-person with grid
@@ -97,7 +134,27 @@ procedurally-generated buildings**:
   `(dungeon, BSP)` pair and repositioning the camera *within* the indoor world.
   The portal never sees a floor change. `depth` — the highest floor reached this
   dive — falls straight out of it, and is the signal the Milestone-3 escalation
-  will scale on.
+  scales on.
+
+<p align="center">
+  <img src="screenshots/newstairs.png" width="90%" alt="An amber stairwell glyph rendered on a floor cell, stacked shrinking squares marking the climb.">
+  <br><em>The stairwell column — stand on it and press U / I to climb or descend, swapping floors without ever crossing the portal.</em>
+</p>
+
+- **The interior fights back.** Three baked wireframe **clone-mobsters** patrol
+  the floors — a **thug** (bruiser) and a hooded **knifeman** close and slash;
+  a **gunman** holds a standoff and fires a slow, *dodgeable* bolt you beat by
+  breaking line of sight. Aggro is line-of-sight-gated, a crowd fans into an arc
+  instead of fusing, and you fight back with a forward strike (**Space**). All of
+  it routes through the same `PlayerState` damage economy as the outdoor war. The
+  longer you linger on a floor, the more often the building sends
+  reinforcements — **escalation over time within a dive**, so searching has a
+  clock.
+
+<p align="center">
+  <img src="screenshots/indoor/surrounded.png" width="90%" alt="First-person interior with three red wireframe enemies — a caped knifeman and two bruisers — fanned out and closing on the player, the damage border lit.">
+  <br><em>Surrounded mid-dive — clone-mobsters fanned into a flanking arc, the building's reinforcements closing in.</em>
+</p>
 
 **The seam.** Crossing between worlds carries `PlayerState` — health, lives,
 score, cleared-building ledger, inventory — and nothing else. Damage taken,
@@ -114,8 +171,8 @@ What this milestone proved: a second engine with its own coordinate convention,
 its own geometry pipeline, and its own combat model dropped into the shell by
 satisfying three small contracts (`World`, `SpatialQuery`, a projectile
 factory) — with no change to the shell, the portal, or the outdoor world — and
-then *grew* a multi-floor, procedurally-generated interior on top of it without
-the shell or the portal learning anything new. The seam holds.
+then *grew* a multi-floor, procedurally-generated, enemy-populated interior on
+top of it without the shell or the portal learning anything new. The seam holds.
 
 ---
 
@@ -157,7 +214,9 @@ The shell is the only thing that owns the runtime. Everything else is a guest.
 The settled technical contract (the seam, the coordinate hazards, what not to
 re-litigate) is `README_POC_Design.md`. The interior plan — the floor stack, the
 `FloorSource` seam, the generator — is `README_Innerworld_Design.md` and the
-session-8 deep dive `README_Inner_world_design_session8.md`.
+session-8 deep dive `README_Inner_world_design_session8.md`. The indoor combat
+slice (the mobster roster, the AI, the bolt, dwell-time escalation) is captured
+in `INDOOR_PRIMER.md`.
 
 ---
 
@@ -171,11 +230,15 @@ python -m az.tests.test_spine              # spine: drive/fire/score/portal/weap
 python -m az.tests.test_indoor_m20         # indoor base: dungeon/collision/LOS/exit — headless
 python -m az.tests.test_floor_stack        # the floor stack + prompt-gated stairs — headless
 python -m az.tests.test_procedural_source  # the generator + FloorSource adapter — headless
+python -m az.tests.test_indoor_combat      # indoor melee: placement, chase, slash, strike — headless
+python -m az.tests.test_indoor_ranged      # the gunman: standoff, LOS-gated fire, bolt flight — headless
+python -m az.tests.test_indoor_escalation  # dwell-time reinforcement waves — headless
 ```
 
-Controls: **W/S** drive or walk · **A/D** turn · **Space** fire · **Tab** cycle
-weapon · **E** enter the tower / leave through the exit · **U / I** take the
-stairs up / down (on the amber stairwell column).
+Controls: **W/S** drive or walk · **A/D** turn · **Space** fire / indoor strike ·
+**Tab** cycle weapon · **E** enter the tower / leave through the exit ·
+**U / I** take the stairs up / down (on the amber stairwell column) ·
+**`` ` ``** pause · **`.`** step one frame while paused · **P** screenshot.
 
 Requires Python 3.11+, `PyQt6`, and `PyOpenGL`. The automated tests are
 headless (no GL/Qt context); the one thing they can't verify is live rendering,
@@ -187,7 +250,7 @@ so visual changes are signed off by running the window.
 
 ```
 az/
-  shell/            the runtime spine — app, World contract, portal, PlayerState
+  shell/            the runtime spine — app, World contract, portal, PlayerState, pause/step
   common/           engine-neutral systems — weapons, spatial queries, motion, models
   hud/              the HUD compositor (reads PlayerState)
   outdoor/          the outdoor world wiring (adapts outerworld_engine to World)
@@ -196,13 +259,20 @@ az/
     director.py         the tier-driven spawn director (population, mix, refill)
     weapons.py          player + enemy weapon/projectile factories
   outerworld_engine/  Battlezone-derived vector engine — tanks, AI, terrain, render
-  indoor/           the indoor world wiring + de-windowed renderer
-    world.py            IndoorWorld — the floor stack, stair swap, collision/LOS, exit
-    floor.py            FloorRuntime — one level: dungeon + lazy BSP + landings
+  indoor/           the indoor world wiring + de-windowed renderer + combat
+    world.py            IndoorWorld — floor stack, stair swap, collision/LOS, exit, combat, escalation
+    floor.py            FloorRuntime — one level: dungeon + lazy BSP + landings + entities + enemies
     floor_source.py     FloorSource seam + ProceduralSource (archetype/footprint gradient)
-    renderer.py         stateless wireframe interior draw (walls, exit + stair markers)
+    placement.py        objectives decorator — plant (deep) + intel (early), deterministic
+    enemy_placement.py  enemy decorator — tier-scaled placement + reinforcement spawn helpers
+    enemies.py          EnemyDef table — thug / knifeman / gunman (Bane stats → indoor units)
+    mob.py              Mob runtime + melee/ranged AI (LOS aggro, slide-along, slash, kite)
+    projectile.py       the gunman's slow, dodgeable bolt
+    renderer.py         stateless wireframe interior draw (walls, markers, mobs, bolts)
+    models/mobsters.py  baked, numpy-free mobster wireframes (regenerated by tools/bake_mobsters)
   innerworld_engine/  Castle of Bane dungeon core — grid, BSP, level vocabulary —
                       plus generate.py, a native seeded rooms-and-corridors generator
+  tools/            design-time tooling — humanoid generator, mobster viewer, the baker
   tests/            headless acceptance tests
   main.py           entry point
 ```
@@ -226,18 +296,23 @@ az/
   driver now, file-backed driver later); internal prompt-gated stairs (U/I); and
   `depth` (max floor reached) tracked as the M3 escalation signal. Solvable by
   construction; deterministic per building.
-- **M2.2 — indoor combat** ⏳ grid line-of-sight enemies; move Bane's
-  player-health into the shell's `PlayerState` (the one invasive thread); the
-  first gunman. A parallel thread to the structure work above.
-- **M3 — the loop** ⏳ the search economy. The escalation *skeleton* already runs
-  — the spawn director plus a `tier` that bumps on return-from-dive — so "the war
-  is worse when you climb back out" is wired in placeholder form. Pending: the
-  hidden win-condition object, the richer reinforcement-on-return, and interiors
-  that yield hints — bridged by the **outcome payload** (`cleared` / `depth` /
-  `found` / `hint`) the exit `Transition` reports. `depth` is already produced;
-  wiring the rest and the plant/intel placement decorator is the next step, and
-  the handoff to the ratchet that turns interior results into battlefield
-  escalation.
+- **M2.2 — indoor melee** ✅ grid line-of-sight enemies — the thug and knifeman
+  close and slash, damage routed through the shell's `PlayerState`; a player
+  forward-strike; and inter-mob separation so a crowd flanks instead of fusing.
+  Three baked, numpy-free mobster wireframes designed in a dedicated viewer.
+- **M2.3 — the gunman + escalation** ✅ the ranged gunman: standoff/kite
+  positioning and a slow, dodgeable bolt the world flies (beaten by breaking
+  LOS); and **dwell-time reinforcement** — a building sends mobs onto your floor
+  faster the longer you linger, the intra-dive ramp that composes with the
+  cross-dive `tier`. Plus a shell-level pause / frame-step for inspection.
+- **M3 — the loop** ⏳ the search economy. The escalation *skeleton* runs — the
+  spawn director plus a `tier` that bumps on return-from-dive (placeholder), and
+  now the intra-dive heat inside a building. The **outcome payload**
+  (`cleared` / `depth` / `found` / `hint`) is reported by the exit `Transition`,
+  and the **plant / intel placement** decorator is in (the win object biased
+  deep, the hint biased early). Pending: the win-condition resolution, richer
+  reinforcement-on-return, and the ratchet that turns interior results into
+  battlefield escalation for real (it bumps `tier` in placeholder form today).
 
 ---
 
@@ -251,5 +326,8 @@ az/
 - **`README_Innerworld_Design.md`** / **`README_Inner_world_design_session8.md`**
   — the interior: the Bane-engine port, the floor stack, the `FloorSource` seam,
   the procedural generator, and the build order toward the M3 outcome payload.
+- **`INDOOR_PRIMER.md`** — the indoor combat slice and the next-session TODO:
+  the mobster roster, the melee/ranged AI, the bolt, dwell-time escalation, the
+  tuning dials, and the open items (first-person staff overlay, kill scoring).
 - **Session primers** — per-session onramps written from the docs above when a
   milestone becomes the active work.

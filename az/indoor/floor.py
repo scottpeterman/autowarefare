@@ -48,7 +48,8 @@ class FloorRuntime:
     down_cell: Cell | None = None      # this floor's down-stair (None on floor 0)
     start_cell: Cell | None = None     # spawn / arrival landing for this floor
     exit_cell: Cell | None = None      # building exit — floor 0 only
-    entities: list[Any] = field(default_factory=list)   # reserved for step 4
+    entities: list[Any] = field(default_factory=list)   # objectives (plant/intel)
+    enemies: list[Any] = field(default_factory=list)     # live Mobs on this floor
 
     _bsp: BSPTree | None = field(default=None, repr=False)
 
